@@ -1,0 +1,105 @@
+{
+  "workspace_id": 1,
+  "cookies": [
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1804507937,
+      "httpOnly": false,
+      "name": "_sentinel_dwid",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": false,
+      "value": "019ccd5c-cf97-72a1-a6bb-6c1366dc7463"
+    },
+    {
+      "domain": ".digikala.com",
+      "expiry": 1772973735,
+      "httpOnly": false,
+      "name": "_sp_ses.13cb",
+      "path": "/",
+      "sameSite": "None",
+      "secure": true,
+      "value": "*"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1807531936,
+      "httpOnly": true,
+      "name": "tracker_glob_new",
+      "path": "/",
+      "sameSite": "None",
+      "secure": true,
+      "value": "ejknKpk"
+    },
+    {
+      "domain": ".seller.digikala.com",
+      "httpOnly": false,
+      "name": "TS018d011a",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": false,
+      "value": "01023105911a2f3a1e525e8da4ceba37c9118e25f9982385eef1bd1aec177c8a328f392058f328805ed7154849acecfdb065bd1ba9"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "httpOnly": false,
+      "name": "PHPSESSID",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": false,
+      "value": "u96q9qtqf337g8dol52qm7tkdi"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1775563935,
+      "httpOnly": true,
+      "name": "seller_api_access_token",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": true,
+      "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzM4NCJ9.eyJ0b2tlbl9pZCI6MzI1MDg2ODEsInNlbGxlcl9pZCI6MTE4NDEzMCwicGF5bG9hZCI6eyJ1c2VybmFtZSI6Ijk4OTE3MjIyNjg1MCIsInJlZ2lzdGVyX3Bob25lIjoiOTg5MTcyMjI2ODUwIiwiZW1haWwiOiJtb3VzYXZpYWxpMTk5QGdtYWlsLmNvbSIsImJ1c2luZXNzX25hbWUiOiJcdTA2MmZcdTA2MzFcdTA2Y2NcdTA2MjdcdTA2Y2MgXHUwNjIyXHUwNjMxXHUwNjI3XHUwNjQ1IFx1MDY0NVx1MDY0NVx1MDYyYVx1MDYyN1x1MDYzMiIsImZpcnN0X25hbWUiOm51bGwsImxhc3RfbmFtZSI6bnVsbCwiY29tcGFueV9uYW1lIjoiXHUwNjJmXHUwNmNjXHUwNjJjXHUwNmNjXHUwNjJhXHUwNjI3XHUwNjQ0IFx1MDYyYVx1MDYyY1x1MDYyN1x1MDYzMVx1MDYyYSBcdTA2YWZcdTA2NDZcdTA2MjdcdTA2NDhcdTA2NDciLCJ2ZXJpZmllZF9ieV9vdHAiOlsiOTg5MTcyMjI2ODUwIl19LCJleHAiOjE3NzU1NjM5MzV9.oo5_7sk493vnu6HNaR5Lw9vZS__0lRw5vYUag1EcOiRTkR7t8Z2ty0Rlr16JKPH9"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1772975535,
+      "httpOnly": true,
+      "name": "seller_api_otp_token",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": true,
+      "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzM4NCJ9.eyJ0eXBlIjoib3RwIiwidG9rZW5faWQiOjMyNTA4NjgwLCJzZWxsZXJfaWQiOm51bGwsInZlcmlmaWVkX2J5X290cCI6Ijk4OTE3MjIyNjg1MCIsImV4cCI6MTc3NTU2MzkzNX0.QLPeml4RdRjmqd-4KazMoWMQm5Bx0NmRobTknGqsJye1XMNxINnKHSoaJxRO29_M"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1772973736,
+      "httpOnly": true,
+      "name": "tracker_session",
+      "path": "/",
+      "sameSite": "None",
+      "secure": true,
+      "value": "2YMlbUa"
+    },
+    {
+      "domain": "seller.digikala.com",
+      "expiry": 1775563937,
+      "httpOnly": false,
+      "name": "_dwid",
+      "path": "/",
+      "sameSite": "Lax",
+      "secure": false,
+      "value": "019ccd5c-cec5-75af-9b11-222f3bf4746d"
+    },
+    {
+      "domain": ".digikala.com",
+      "expiry": 1807531935,
+      "httpOnly": false,
+      "name": "_sp_id.13cb",
+      "path": "/",
+      "sameSite": "None",
+      "secure": true,
+      "value": "4ac25ba6-1cf8-4ff1-b415-7d217eb29a67.1772971908.1.1772971936..f64e918c-b470-40a7-8371-7d1963e9e93e..29560e91-22a9-4124-ab58-ba0efbdc7e67.1772971908286.6"
+    }
+  ],
+  "created_at": "2026-03-08T15:42:42.377083",
+  "count": 10
+}
