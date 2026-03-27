@@ -3,180 +3,231 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-
-# ایمپورت کردن مدیریت کوکی‌های خودت
-from manual_cookie_login import ManualCookieManager
+from utils.manual_cookie_login import ManualCookieManager
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SESSIONS_DIR = BASE_DIR / "panel_sessions"
 
 class DigikalaRepricer:
-    def __init__(self, workspace_id, variant_id, min_price, max_price, step_price=1000):
+    def __init__(self, workspace_id, log_callback=None):
         self.workspace_id = workspace_id
-        self.variant_id = variant_id # شناسه تنوع کالا (نه DKPC اصلی، بلکه کد تنوع فروشنده)
-        self.min_price = min_price
-        self.max_price = max_price
-        self.step_price = step_price # پله‌های کاهش قیمت (مثلا ۱۰۰۰ تومان)
+        self.log_callback = log_callback
         
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
             "Origin": "https://seller.digikala.com",
-            "Referer": "https://seller.digikala.com/"
+            "Referer": "https://seller.digikala.com/pwa/variant-management"
         })
         self._load_cookies()
 
     def log(self, msg):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [🤖 Repricer] {msg}", flush=True)
+        time_str = datetime.now().strftime('%H:%M:%S')
+        full_msg = f"[{time_str}] {msg}"
+        print(full_msg, flush=True)
+        if self.log_callback:
+            self.log_callback(full_msg)
 
     def _load_cookies(self):
-        """لود کردن کوکی‌های اکانت از فایل‌های موجود در سیستم فعلی"""
         cm = ManualCookieManager(SESSIONS_DIR)
         status = cm.check_cookie_validity(self.workspace_id)
-        
         if status['valid']:
             path = cm.get_cookie_path(self.workspace_id)
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    cookies = data.get('cookies', [])
-                    for c in cookies:
+                    for c in data.get('cookies', []):
                         if 'name' in c and 'value' in c:
                             self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''))
-                self.log("✅ کوکی‌ها با موفقیت در سشن ربات لود شدند.")
             except Exception as e:
-                self.log(f"❌ خطا در خواندن فایل کوکی: {e}")
+                self.log(f"❌ خطا در خواندن کوکی: {e}")
         else:
-            self.log("❌ کوکی معتبری یافت نشد. لطفاً ابتدا در پنل اصلی لاگین کنید.")
+            self.log("❌ کوکی یافت نشد. لاگین کنید.")
 
-    def get_competitor_price(self):
-        """
-        دریافت قیمت بای‌باکس و اطلاعات رقبا.
-        نکته: این API ممکنه در دیجی‌کالا تغییر کنه. اگر کار نکرد، از Network مرورگر آدرس دقیق رو جایگزین کن.
-        """
-        # آدرس API برای دریافت اطلاعات تنوع و قیمت‌های سایر فروشندگان
-        url = f"https://seller.digikala.com/api/v1/variants/{self.variant_id}/competitors/"
-        
+    def get_my_variants(self, page=1):
+        url = f"https://seller.digikala.com/api/v2/variants?page={page}&size=50&sort=product_variant_id&order=desc"
+        try:
+            response = self.session.get(url, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("data", {}).get("items", [])
+                total_pages = data.get("data", {}).get("pager", {}).get("total_pages", 1)
+                
+                variants = []
+                for item in items:
+                    if item.get("active") and item.get("marketplace_seller_stock", 0) > 0:
+                        variants.append({
+                            "variant_id": item.get("product_variant_id"),
+                            "title": item.get("product_title"),
+                            "is_buy_box_winner": item.get("is_buy_box_winner"),
+                            "current_price": item.get("price_sale"),
+                            "reference_price": item.get("price_list"), 
+                            "buy_box_price": item.get("buy_box_price")
+                        })
+                return {"success": True, "variants": variants, "total_pages": total_pages}
+            else:
+                return {"success": False, "variants": [], "total_pages": 1}
+        except Exception as e:
+            self.log(f"خطای شبکه: {e}")
+            return {"success": False, "variants": [], "total_pages": 1}
+
+    def get_competitor_price(self, variant_id):
+        url = f"https://seller.digikala.com/api/v1/variants/{variant_id}/competitors/"
         try:
             response = self.session.get(url, timeout=10)
             if response.status_code == 200:
-                data = response.json()
-                # این بخش بستگی به ساختار دقیق JSON دیجی‌کالا دارد. 
-                # فرض میکنیم ارزان‌ترین قیمت رقیب را از لیست برمی‌دارد.
-                competitors = data.get('data', {}).get('competitors', [])
+                competitors = response.json().get('data', {}).get('competitors', [])
+                if not competitors: return None, True 
                 
-                if not competitors:
-                    self.log("تنوع رقیبی یافت نشد. شما در بای‌باکس هستید.")
-                    return None, True # قیمت رقیب نداریم، بای باکس دست ماست
-
-                # پیدا کردن ارزان ترین قیمت رقیب (صرف نظر از خودمان)
-                lowest_competitor_price = float('inf')
+                lowest_comp = float('inf')
                 for comp in competitors:
-                    if not comp.get('is_me'): # اگر خودمان نیستیم
+                    if not comp.get('is_me'):
                         price = comp.get('price', float('inf'))
-                        if price < lowest_competitor_price:
-                            lowest_competitor_price = price
-                            
-                return lowest_competitor_price, False
-            else:
-                self.log(f"⚠️ خطا در دریافت قیمت رقبا. کد وضعیت: {response.status_code}")
-                return None, False
-        except Exception as e:
-            self.log(f"❌ خطای شبکه در دریافت قیمت: {e}")
+                        if price < lowest_comp: lowest_comp = price
+                return lowest_comp, False
+            return None, False
+        except:
             return None, False
 
-    def update_my_price(self, new_price):
-        """ارسال درخواست تغییر قیمت به دیجی‌کالا"""
-        url = "https://seller.digikala.com/api/v1/variants/price/"
+    def update_my_price(self, variant_id, new_price, silent=False):
+        # آدرس جدید دیجی‌کالا برای تغییرات گروهی/تکی
+        url = "https://seller.digikala.com/api/v2/variants/bulk"
         
+        # ساختار جدید Payload بر اساس ریکوئستی که استخراج کردید
         payload = {
             "variants": [
                 {
-                    "id": self.variant_id,
-                    "price": int(new_price)
+                    "variant_id": int(variant_id),
+                    "selling_price": int(new_price)
                 }
             ]
         }
         
         try:
-            response = self.session.post(url, json=payload, timeout=10)
+            # توجه: متد ارسال از POST به PUT تغییر کرد
+            response = self.session.put(url, json=payload, timeout=10)
+            
             if response.status_code == 200:
-                self.log(f"✅ قیمت با موفقیت به {new_price} تومان تغییر کرد!")
-                return True
-            else:
-                self.log(f"❌ خطا در تغییر قیمت. پاسخ سرور: {response.text}")
-                return False
-        except Exception as e:
-            self.log(f"❌ خطای شبکه در هنگام تغییر قیمت: {e}")
-            return False
-
-    def evaluate_and_act(self):
-        """هسته اصلی منطق تله سقف و کف"""
-        self.log("در حال بررسی قیمت‌ها...")
-        comp_price, i_am_buybox = self.get_competitor_price()
-
-        if i_am_buybox:
-            self.log("بای‌باکس دست شماست. نیازی به تغییر نیست.")
-            return
-
-        if comp_price is None or comp_price == float('inf'):
-            self.log("اطلاعات رقیب پردازش نشد.")
-            return
-
-        self.log(f"ارزان‌ترین رقیب: {comp_price} | کف ما: {self.min_price} | سقف ما: {self.max_price}")
-
-        # منطق استراتژی
-        if comp_price >= self.max_price:
-            # رقیب پریده روی سقف یا بالاتر! ما بای باکس رو با سود عالی می‌گیریم
-            target_price = self.max_price - self.step_price
-            self.log(f"🎯 رقیب به سقف رسید! تنظیم روی قیمت هدف: {target_price}")
-            self.update_my_price(target_price)
-            
-        elif comp_price <= self.min_price:
-            # رقیب به کف چسبیده است. ما هیچ کاری نمی‌کنیم تا او بدون سود بفروشد
-            self.log("📉 رقیب در کف قیمت است. او را رها می‌کنیم تا سودش صفر بماند.")
-            
-        elif self.min_price < comp_price < self.max_price:
-            # رقیب بین کف و سقف است. ما ۱۰۰۰ تومن می‌آییم زیر قیمت او
-            target_price = comp_price - self.step_price
-            if target_price < self.min_price:
-                target_price = self.min_price # از کف خودمان پایین‌تر نمی‌رویم
+                resp_json = response.json()
+                # در نسخه جدید، دیجی‌کالا خطاها را در یک آرایه errors برمی‌گرداند
+                errors = resp_json.get("data", {}).get("errors", [])
                 
-            self.log(f"⚔️ رقابت در جریان است. تغییر قیمت به: {target_price}")
-            self.update_my_price(target_price)
+                if not errors:
+                    if not silent: self.log(f"✅ [تنوع {variant_id}] قیمت تغییر کرد: {new_price}")
+                    return {"success": True, "message": "OK"}
+                else:
+                    # استخراج متن خطای داخل آرایه
+                    error_msg = str(errors)
+                    if not silent: self.log(f"⚠️ [تنوع {variant_id}] عدم تایید سایت: {error_msg}")
+                    return {"success": False, "message": error_msg}
+            else:
+                try:
+                    error_msg = response.json().get('message', str(response.json()))
+                except ValueError:
+                    error_msg = f"پاسخ نامعتبر از سرور (کد {response.status_code})."
+                
+                if not silent: self.log(f"⚠️ [تنوع {variant_id}] خطای سیستم: {error_msg}")
+                return {"success": False, "message": str(error_msg)}
+                
+        except Exception as e:
+            if not silent: self.log(f"❌ خطای شبکه/ارتباط: {e}")
+            return {"success": False, "message": str(e)}
+          
+    # نسخه پیشرفته و عمیق کشف بازه (12 مرحله تست برای هر طرف)
+    def discover_price_bounds(self, variant_id, reference_price, current_price):
+        if not reference_price: reference_price = current_price
+        self.log(f"🔍 شروع اسکن مویرگی برای تنوع {variant_id}...")
+        
+        # 1. جستجوی سقف (Max Price)
+        self.log(">> فاز ۱: در حال نفوذ برای پیدا کردن سقف مجاز...")
+        max_valid = current_price
+        low_pct = 0.0   
+        high_pct = 0.8  
+        
+        for i in range(10): 
+            mid = (low_pct + high_pct) / 2
+            
+            raw_test = reference_price * (1 + mid)
+            test_price = int(round(raw_test / 1000.0) * 1000)
+            
+            self.log(f"سقف {i+1}/10 | تست +{round(mid*100, 2)}% ({test_price} تومان)")
+            res = self.update_my_price(variant_id, test_price, silent=False)
+            
+            # وقفه ۳ ثانیه‌ای برای جلوگیری از بلاک شدن توسط فایروال دیجی‌کالا
+            time.sleep(3) 
+            
+            if res['success']:
+                max_valid = test_price
+                low_pct = mid 
+                self.log("✔️ تایید شد! (بازگردانی فوری)")
+                self.update_my_price(variant_id, current_price, silent=True) 
+                time.sleep(1) # استراحت کوتاه بعد از بازگردانی
+            else:
+                high_pct = mid 
+                
+        # 2. جستجوی کف (Min Price)
+        self.log(">> فاز ۲: در حال نفوذ برای پیدا کردن کف مجاز...")
+        min_valid = current_price
+        low_pct = 0.0   
+        high_pct = 0.5  
+        
+        for i in range(10): 
+            mid = (low_pct + high_pct) / 2
+            
+            raw_test = reference_price * (1 - mid)
+            test_price = int(round(raw_test / 1000.0) * 1000)
+            
+            self.log(f"کف {i+1}/10 | تست -{round(mid*100, 2)}% ({test_price} تومان)")
+            res = self.update_my_price(variant_id, test_price, silent=False)
+            
+            # وقفه ۳ ثانیه‌ای برای جلوگیری از بلاک شدن توسط فایروال دیجی‌کالا
+            time.sleep(3)
+            
+            if res['success']:
+                min_valid = test_price
+                low_pct = mid 
+                self.log("✔️ تایید شد! (بازگردانی فوری)")
+                self.update_my_price(variant_id, current_price, silent=True)
+                time.sleep(1)
+            else:
+                high_pct = mid
 
-# =====================================================================
-# بخش تست مستقل
-# =====================================================================
-if __name__ == "__main__":
-    import shutil
+        self.log(f"🎯 عملیات تمام شد! | کف نهایی: {min_valid} | سقف نهایی: {max_valid}")
+        return {"success": True, "min_price": min_valid, "max_price": max_valid}
     
-    # 1. کپی کردن کوکی‌های موجود برای تست (اگر در j3 هست، دستی در j4/panel_sessions کپی کن)
-    if not SESSIONS_DIR.exists():
-        SESSIONS_DIR.mkdir(parents=True)
-        print("پوشه panel_sessions ساخته شد. لطفا فایل کوکی ws_1_cookies.json را از پروژه اصلی به اینجا کپی کنید.")
-        exit()
+    def evaluate_and_act_all(self, product_configs, step_price=1000):
+        self.log("شروع چرخه بررسی...")
+        page = 1
+        total_pages = 1
+        while page <= total_pages:
+            res = self.get_my_variants(page)
+            if not res['success']: break
+            total_pages = res['total_pages']
+            
+            for item in res['variants']:
+                vid = str(item['variant_id'])
+                if vid not in product_configs: continue
+                    
+                conf = product_configs[vid]
+                min_p = conf.get('min_price', 0)
+                max_p = conf.get('max_price', float('inf'))
+                
+                if item['is_buy_box_winner']: continue
+                    
+                comp_price, i_am_buybox = self.get_competitor_price(vid)
+                if i_am_buybox or comp_price is None or comp_price == float('inf'): continue
 
-    # اطلاعات تست (این مقادیر را با اطلاعات واقعی یک کالای تست جایگزین کن)
-    WORKSPACE_ID = 1 # شناسه پنل شما در دیتابیس
-    TEST_VARIANT_ID = 12345678 # شناسه تنوع کالا (دقت کن کد DKPC نیست، کد Variant است)
-    MIN_PRICE = 1500000  # کف قیمت به ریال یا تومان (بستگی به پنل دارد، معمولا ریال است)
-    MAX_PRICE = 1700000  # سقف قیمت
+                target_price = comp_price - step_price
+                if target_price < min_p:
+                    self.log(f"📉 رقیب زیر کف قیمت ماست! ({item['title'][:20]}...)")
+                    continue
+                elif target_price > max_p:
+                    target_price = max_p - step_price
 
-    bot = DigikalaRepricer(
-        workspace_id=WORKSPACE_ID,
-        variant_id=TEST_VARIANT_ID,
-        min_price=MIN_PRICE,
-        max_price=MAX_PRICE,
-        step_price=1000 # هزار تومان زیر قیمت رقیب
-    )
-
-    # اجرای یکباره برای تست
-    bot.evaluate_and_act()
-    
-    # برای اجرای مداوم می‌توانید از حلقه زیر استفاده کنید:
-    # while True:
-    #     bot.evaluate_and_act()
-    #     time.sleep(120) # هر 2 دقیقه یکبار چک می‌کند
+                if target_price != item['current_price']:
+                    self.update_my_price(vid, target_price)
+                    time.sleep(1)
+            page += 1
+        self.log("پایان چرخه. منتظر دور بعدی...")
