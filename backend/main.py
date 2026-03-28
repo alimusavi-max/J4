@@ -20,8 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CONFIG_FILE   = "repricer_config.json"
-SETTINGS_FILE = "repricer_settings.json"
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "repricer_config.json"
+SETTINGS_FILE = BASE_DIR / "repricer_settings.json"
 
 DEFAULT_SETTINGS = {
     "lead_time":               2,
@@ -85,8 +86,12 @@ def run_bot_loop(workspace_id: int, step_price: int, cycle_delay: int = 120):
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
 
     while bot_state["is_running"]:
-        configs = _load_config()
-        result = bot.evaluate_and_act_all(configs, step_price=step_price)
+        try:
+            configs = _load_config()
+            result = bot.evaluate_and_act_all(configs, step_price=step_price)
+        except Exception as e:
+            save_log(f"❌ خطای پیش‌بینی‌نشده در چرخه ربات: {e}")
+            result = {"updated_count": 0, "buybox_count": 0, "rate_limit_hits": 0}
 
         bot_state["cycle_count"]    += 1
         bot_state["total_updates"]  += result.get("updated_count", 0)
