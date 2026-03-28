@@ -131,3 +131,4 @@
 - ✅ **فاز ۳**: Strategyها به ماژول جدا منتقل شد + guardrailهای `cooldown` و `max_price_change_percent` + `dry_run`.
 - ✅ **فاز ۴**: endpointهای `readiness` و `auth diagnostics` برای مانیتورینگ سریع اضافه شد.
 - ✅ **فاز ۵**: پشتیبانی از secret توکن با env (`DIGIKALA_AUTH_TOKEN`) و webhook هشدار (`notify_webhook_url`) اضافه شد.
+- ✅ **ادامه فاز ۵**: circuit-breaker ایمنی (pause خودکار بر اساس خطای متوالی/429) و endpoint متریک (`/api/metrics`) اضافه شد.

@@ -40,6 +40,8 @@ DEFAULT_SETTINGS = {
     "variant_cooldown_seconds": 300,
     "max_price_change_percent": 8.0,
     "notify_webhook_url":      "",
+    "rate_limit_pause_seconds": 180,
+    "max_consecutive_failures": 10,
 }
 
 # ─── State مدیریت ربات ───────────────────────────────────────────────
@@ -144,6 +146,8 @@ class SettingsModel(BaseModel):
     variant_cooldown_seconds:int   = 300
     max_price_change_percent:float = 8.0
     notify_webhook_url:      str   = ""
+    rate_limit_pause_seconds:int   = 180
+    max_consecutive_failures:int   = 10
 
 class FormulaTestModel(BaseModel):
     formula:       str
@@ -175,6 +179,11 @@ def readiness(workspace_id: int = 1):
 def auth_diagnostics(workspace_id: int = 1):
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
     return {"status": "ok", "diagnostics": bot.get_auth_diagnostics()}
+
+@app.get("/api/metrics")
+def metrics(workspace_id: int = 1):
+    bot = DigikalaRepricer(workspace_id, log_callback=save_log)
+    return {"status": "ok", "metrics": bot.get_runtime_metrics()}
 
 
 # ─── Products ────────────────────────────────────────────────────────
@@ -250,6 +259,10 @@ def save_settings(data: SettingsModel):
         raise HTTPException(400, "cooldown نباید منفی باشد")
     if data.max_price_change_percent <= 0:
         raise HTTPException(400, "max_price_change_percent باید مثبت باشد")
+    if data.rate_limit_pause_seconds < 30:
+        raise HTTPException(400, "rate_limit_pause_seconds باید حداقل ۳۰ ثانیه باشد")
+    if data.max_consecutive_failures < 1:
+        raise HTTPException(400, "max_consecutive_failures باید حداقل ۱ باشد")
 
     settings = data.model_dump()
     with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:

@@ -29,6 +29,8 @@ DEFAULT_SETTINGS = {
     "variant_cooldown_seconds": 300,
     "max_price_change_percent": 8.0,
     "notify_webhook_url": "",
+    "rate_limit_pause_seconds": 180,
+    "max_consecutive_failures": 10,
 }
 
 
@@ -73,6 +75,8 @@ class DigikalaRepricer:
             "rate_limit_hits": 0,
             "failed_updates": 0,
             "last_error": "",
+            "consecutive_failures": 0,
+            "paused_until": 0,
         }
         self.last_update_at = {}
         self.price_history = {}
@@ -170,6 +174,38 @@ class DigikalaRepricer:
         except Exception:
             pass
 
+    def _is_paused(self) -> bool:
+        return time.time() < float(self.stats.get("paused_until", 0))
+
+    def _pause_engine(self, seconds: int, reason: str):
+        until = time.time() + max(1, int(seconds))
+        self.stats["paused_until"] = until
+        until_text = datetime.fromtimestamp(until).isoformat(timespec="seconds")
+        self.log(f"⏸ موتور repricer تا {until_text} متوقف شد | علت: {reason}")
+        self._notify(f"repricer paused until {until_text} | reason={reason}")
+
+    def _on_update_failure(self, reason: str):
+        self.stats["failed_updates"] += 1
+        self.stats["consecutive_failures"] += 1
+        self.stats["last_error"] = reason
+        settings = self._load_settings()
+        max_fails = int(settings.get("max_consecutive_failures", 10))
+        pause_seconds = int(settings.get("rate_limit_pause_seconds", 180))
+        if self.stats["consecutive_failures"] >= max_fails:
+            self._pause_engine(pause_seconds, f"consecutive failures={self.stats['consecutive_failures']}")
+            self.stats["consecutive_failures"] = 0
+
+    def _on_update_success(self):
+        self.stats["consecutive_failures"] = 0
+
+    def get_runtime_metrics(self) -> dict:
+        return {
+            "workspace_id": self.workspace_id,
+            "stats": self.stats,
+            "tracked_variants": len(self.price_history),
+            "is_paused": self._is_paused(),
+        }
+
     def _is_in_cooldown(self, variant_id: str, cooldown_seconds: int) -> bool:
         last = self.last_update_at.get(variant_id)
         if not last:
@@ -209,6 +245,7 @@ class DigikalaRepricer:
             "has_csrf_header": csrf_exists,
             "variants_read_status": read_status,
             "is_read_auth_ok": read_status == 200,
+            "is_paused": self._is_paused(),
         }
 
     # ─── Human-like delay ───────────────────────────────────────────────
@@ -343,12 +380,16 @@ class DigikalaRepricer:
                     wait = backoff_base * (2 ** attempt)   # 15s → 30s → 60s
                     self.stats["rate_limit_hits"] += 1
                     self.log(f"⏸ محدودیت 429! (تلاش {attempt+1}/{max_retries}) {wait} ثانیه صبر...")
+                    if self.stats["rate_limit_hits"] > 0 and self.stats["rate_limit_hits"] % 8 == 0:
+                        pause_seconds = int(settings.get("rate_limit_pause_seconds", 180))
+                        self._pause_engine(pause_seconds, "repeated 429 responses")
                     time.sleep(wait)
                     continue
 
                 # ─── 401: کوکی تموم شده ──────────────────────────────
                 if response.status_code == 401:
                     self.log("⚠️ کوکی منقضی شده! نیاز به لاگین مجدد.")
+                    self._on_update_failure("auth_error")
                     return {"success": False, "message": "auth_error"}
 
                 # ─── موفق ─────────────────────────────────────────────
@@ -364,6 +405,7 @@ class DigikalaRepricer:
                         if not silent:
                             self.log(f"✅ [تنوع {variant_id}] ← {new_price:,} تومان")
                         self.stats["total_updates"] += 1
+                        self._on_update_success()
                         self.last_update_at[str(variant_id)] = time.time()
                         self.price_history[str(variant_id)] = {
                             "price": int(new_price),
@@ -374,8 +416,7 @@ class DigikalaRepricer:
                         error_msg = str(errors)
                         if not silent:
                             self.log(f"⚠️ [تنوع {variant_id}] رد شد: {error_msg}")
-                        self.stats["failed_updates"] += 1
-                        self.stats["last_error"] = error_msg
+                        self._on_update_failure(error_msg)
                         return {"success": False, "message": error_msg}
 
                 # ─── سایر خطاها ───────────────────────────────────────
@@ -385,8 +426,7 @@ class DigikalaRepricer:
                     error_msg = f"HTTP {response.status_code}"
                 if not silent:
                     self.log(f"⚠️ [تنوع {variant_id}] خطا: {error_msg}")
-                self.stats["failed_updates"] += 1
-                self.stats["last_error"] = str(error_msg)
+                self._on_update_failure(str(error_msg))
                 return {"success": False, "message": str(error_msg)}
 
             except requests.exceptions.Timeout:
@@ -405,8 +445,7 @@ class DigikalaRepricer:
                     continue
                 if not silent:
                     self.log(f"❌ خطای شبکه: {e}")
-                self.stats["failed_updates"] += 1
-                self.stats["last_error"] = str(e)
+                self._on_update_failure(str(e))
                 return {"success": False, "message": str(e)}
 
         return {"success": False, "message": "max retries exceeded"}
@@ -511,6 +550,9 @@ class DigikalaRepricer:
         """
         self.stats["cycles"] += 1
         self.stats["last_cycle_time"] = datetime.now().isoformat()
+        if self._is_paused():
+            self.log("⏸ این چرخه به دلیل pause ایمنی اجرا نشد.")
+            return {"buybox_count": 0, "updated_count": 0, "skipped_count": 0, "rate_limit_hits": self.stats["rate_limit_hits"]}
         settings = self._load_settings()
         strategy = settings.get("strategy_mode", "aggressive")
         buybox_formula = settings.get("buybox_formula", "competitor_price - step_price")
