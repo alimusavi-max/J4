@@ -20,8 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CONFIG_FILE   = "repricer_config.json"
-SETTINGS_FILE = "repricer_settings.json"
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "repricer_config.json"
+SETTINGS_FILE = BASE_DIR / "repricer_settings.json"
 
 DEFAULT_SETTINGS = {
     "lead_time":               2,
@@ -35,6 +36,10 @@ DEFAULT_SETTINGS = {
     "min_price_formula":       "",
     "auto_apply_min_price":    False,
     "strategy_mode":           "aggressive",
+    "dry_run":                 False,
+    "variant_cooldown_seconds": 300,
+    "max_price_change_percent": 8.0,
+    "notify_webhook_url":      "",
 }
 
 # ─── State مدیریت ربات ───────────────────────────────────────────────
@@ -85,8 +90,12 @@ def run_bot_loop(workspace_id: int, step_price: int, cycle_delay: int = 120):
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
 
     while bot_state["is_running"]:
-        configs = _load_config()
-        result = bot.evaluate_and_act_all(configs, step_price=step_price)
+        try:
+            configs = _load_config()
+            result = bot.evaluate_and_act_all(configs, step_price=step_price)
+        except Exception as e:
+            save_log(f"❌ خطای پیش‌بینی‌نشده در چرخه ربات: {e}")
+            result = {"updated_count": 0, "buybox_count": 0, "rate_limit_hits": 0}
 
         bot_state["cycle_count"]    += 1
         bot_state["total_updates"]  += result.get("updated_count", 0)
@@ -131,6 +140,10 @@ class SettingsModel(BaseModel):
     min_price_formula:       str   = ""
     auto_apply_min_price:    bool  = False
     strategy_mode:           str   = "aggressive"
+    dry_run:                 bool  = False
+    variant_cooldown_seconds:int   = 300
+    max_price_change_percent:float = 8.0
+    notify_webhook_url:      str   = ""
 
 class FormulaTestModel(BaseModel):
     formula:       str
@@ -147,6 +160,21 @@ class ApplyMinFormulaModel(BaseModel):
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "3.0.0", "bot": bot_state}
+
+@app.get("/api/health/readiness")
+def readiness(workspace_id: int = 1):
+    bot = DigikalaRepricer(workspace_id, log_callback=save_log)
+    diag = bot.get_auth_diagnostics()
+    return {
+        "status": "ready" if diag["is_read_auth_ok"] else "degraded",
+        "time": datetime.now().isoformat(),
+        "diagnostics": diag,
+    }
+
+@app.get("/api/diagnostics/auth")
+def auth_diagnostics(workspace_id: int = 1):
+    bot = DigikalaRepricer(workspace_id, log_callback=save_log)
+    return {"status": "ok", "diagnostics": bot.get_auth_diagnostics()}
 
 
 # ─── Products ────────────────────────────────────────────────────────
@@ -218,6 +246,10 @@ def save_settings(data: SettingsModel):
         raise HTTPException(400, "تاخیر کمینه نباید بیشتر از بیشینه باشد")
     if data.rate_limit_backoff_base < 5:
         raise HTTPException(400, "backoff نباید کمتر از ۵ ثانیه باشد")
+    if data.variant_cooldown_seconds < 0:
+        raise HTTPException(400, "cooldown نباید منفی باشد")
+    if data.max_price_change_percent <= 0:
+        raise HTTPException(400, "max_price_change_percent باید مثبت باشد")
 
     settings = data.model_dump()
     with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
