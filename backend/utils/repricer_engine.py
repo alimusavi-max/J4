@@ -52,6 +52,7 @@ class DigikalaRepricer:
             "x-api-client": "pwa",
         })
         self._load_cookies()
+        self._set_csrf_header_from_cookies()
 
     # ─── Logging ────────────────────────────────────────────────────────
     def log(self, msg):
@@ -95,6 +96,22 @@ class DigikalaRepricer:
                 self.log(f"❌ خطا در خواندن کوکی: {e}")
         else:
             self.log(f"❌ کوکی workspace {self.workspace_id} یافت نشد. لاگین کنید.")
+
+    def _set_csrf_header_from_cookies(self):
+        """
+        بعضی endpointهای Seller برای عملیات write به csrf-token وابسته‌اند.
+        اگر csrf token در کوکی پیدا شود، هدرهای رایج ست می‌شوند.
+        """
+        csrf = (
+            self.session.cookies.get("csrf_access_token")
+            or self.session.cookies.get("csrftoken")
+            or self.session.cookies.get("XSRF-TOKEN")
+        )
+        if csrf:
+            self.session.headers.update({
+                "x-csrf-token": csrf,
+                "X-CSRFToken": csrf,
+            })
 
     # ─── Human-like delay ───────────────────────────────────────────────
     def _sleep_human(self, settings: dict = None):
@@ -225,8 +242,13 @@ class DigikalaRepricer:
                     return {"success": False, "message": "auth_error"}
 
                 # ─── موفق ─────────────────────────────────────────────
-                if response.status_code == 200:
+                if response.status_code in (200, 201):
                     resp_json = response.json()
+                    if resp_json.get("status") is False:
+                        err = resp_json.get("message") or "status=false"
+                        if not silent:
+                            self.log(f"⚠️ [تنوع {variant_id}] پاسخ ناموفق: {err}")
+                        return {"success": False, "message": str(err)}
                     errors = resp_json.get("data", {}).get("errors", [])
                     if not errors:
                         if not silent:
@@ -283,7 +305,7 @@ class DigikalaRepricer:
 
         for i in range(10):
             mid = (low_pct + high_pct) / 2
-            test_price = int(round(reference_price * (1 + mid) / 1000.0) * 1000)
+            test_price = int(round((reference_price * (1 + mid)) / 1000.0) * 1000)
             self.log(f"  سقف [{i+1}/10] +{round(mid*100, 1)}% → {test_price:,}")
 
             res = self.update_my_price(variant_id, test_price, silent=True)
@@ -302,7 +324,7 @@ class DigikalaRepricer:
 
         for i in range(10):
             mid = (low_pct + high_pct) / 2
-            test_price = int(round(reference_price * (1 - mid) / 1000.0) * 1000)
+            test_price = int(round((reference_price * (1 - mid)) / 1000.0) * 1000)
             if test_price <= 0:
                 high_pct = mid
                 continue
