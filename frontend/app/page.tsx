@@ -5,14 +5,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const API = "http://localhost:8000";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-const fmt = (n: any) => (n != null && n !== "" ? Number(n).toLocaleString("fa-IR") : "—");
-const fmtNum = (n: any) => (n != null && n !== "" ? Number(n).toLocaleString() : "—");
-const fmtPct = (n: number, d: number) =>
-  d > 0 ? Math.round((n / d) * 100) + "%" : "0%";
+const fmt = (n: any) =>
+  n != null && n !== "" ? Number(n).toLocaleString("fa-IR") : "—";
+const fmtNum = (n: any) =>
+  n != null && n !== "" ? Number(n).toLocaleString() : "—";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface Product {
   variant_id: number;
+  product_id?: number;
   title: string;
   is_buy_box_winner: boolean;
   current_price: number;
@@ -23,13 +24,14 @@ interface Product {
   min_price: string | number;
   max_price: string | number;
   has_config: boolean;
-  is_active?: boolean; // ← برای روشن/خاموش تنوع
+  enabled?: boolean;
+  strategy?: string;
+  step?: number;
 }
 
 interface BotState {
   is_running?: boolean;
   workspace_id?: number;
-  step_price?: number;
   started_at?: string;
   cycle_count?: number;
   total_updates?: number;
@@ -45,16 +47,20 @@ interface Settings {
   request_delay_max: number;
   rate_limit_backoff_base: number;
   max_retries: number;
-  buybox_formula: string;
-  min_price_formula: string;
-  auto_apply_min_price: boolean;
-  strategy_mode: string;
+  default_strategy: string;
+  default_step: number;
   dry_run: boolean;
   variant_cooldown_seconds: number;
-  max_price_change_percent: number;
   notify_webhook_url: string;
   rate_limit_pause_seconds: number;
   max_consecutive_failures: number;
+  my_seller_id: number;
+}
+
+interface Strategy {
+  key: string;
+  label: string;
+  desc: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -65,241 +71,257 @@ const DEFAULT_SETTINGS: Settings = {
   request_delay_max: 6.0,
   rate_limit_backoff_base: 15,
   max_retries: 3,
-  buybox_formula: "competitor_price - step_price",
-  min_price_formula: "",
-  auto_apply_min_price: false,
-  strategy_mode: "aggressive",
+  default_strategy: "aggressive",
+  default_step: 1000,
   dry_run: false,
   variant_cooldown_seconds: 300,
-  max_price_change_percent: 8.0,
   notify_webhook_url: "",
   rate_limit_pause_seconds: 180,
   max_consecutive_failures: 10,
+  my_seller_id: 0,
 };
 
 type ActiveTab = "dashboard" | "products" | "settings" | "logs";
-type FilterMode = "all" | "winning" | "losing" | "configured" | "unconfigured";
-
-// ─── Icons ───────────────────────────────────────────────────────────────────
-const Icon = {
-  Dashboard: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
-      <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
-    </svg>
-  ),
-  Products: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-    </svg>
-  ),
-  Settings: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-    </svg>
-  ),
-  Logs: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" />
-      <line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" />
-    </svg>
-  ),
-  Play: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-      <polygon points="5,3 19,12 5,21" />
-    </svg>
-  ),
-  Stop: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-    </svg>
-  ),
-  Refresh: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-      <polyline points="23,4 23,10 17,10" /><polyline points="1,20 1,14 7,14" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
-  ),
-  Save: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17,21 17,13 7,13" /><polyline points="7,3 7,8 15,8" />
-    </svg>
-  ),
-  Search: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  ),
-  ChevronDown: () => (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-      <polyline points="6,9 12,15 18,9" />
-    </svg>
-  ),
-  Trash: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <polyline points="3,6 5,6 21,6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4h6v2" />
-    </svg>
-  ),
-  Zap: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <polygon points="13,2 3,14 12,14 11,22 21,10 12,10" />
-    </svg>
-  ),
-  Trophy: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M6 9H4a2 2 0 0 1-2-2V5h4M18 9h2a2 2 0 0 0 2-2V5h-4" />
-      <path d="M8 21h8M12 17v4" />
-      <path d="M6 9a6 6 0 0 0 12 0V3H6v6z" />
-    </svg>
-  ),
-  Toggle: ({ on }: { on: boolean }) => (
-    <svg width="36" height="20" viewBox="0 0 36 20">
-      <rect width="36" height="20" rx="10" fill={on ? "#22c55e" : "#374151"} />
-      <circle cx={on ? "26" : "10"} cy="10" r="8" fill="white" style={{ transition: "cx 0.2s" }} />
-    </svg>
-  ),
-  Warning: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-    </svg>
-  ),
-  Copy: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="9" y="9" width="13" height="13" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  ),
-};
+type FilterMode = "all" | "winning" | "losing" | "enabled" | "disabled";
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
-interface Toast { id: number; msg: string; type: "success" | "error" | "info" }
+interface Toast {
+  id: number;
+  msg: string;
+  type: "success" | "error" | "info" | "warn";
+}
 let toastId = 0;
 
-function ToastContainer({ toasts, remove }: { toasts: Toast[]; remove: (id: number) => void }) {
+function ToastContainer({
+  toasts,
+  remove,
+}: {
+  toasts: Toast[];
+  remove: (id: number) => void;
+}) {
+  const colors: Record<string, string> = {
+    success: "#00ff9d",
+    error: "#ff4560",
+    warn: "#ffb700",
+    info: "#00cfff",
+  };
   return (
-    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none" style={{ minWidth: 320 }}>
-      {toasts.map(t => (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 24,
+        right: 24,
+        zIndex: 9999,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {toasts.map((t) => (
         <div
           key={t.id}
           onClick={() => remove(t.id)}
-          className="pointer-events-auto cursor-pointer px-5 py-3 rounded-xl text-sm font-medium shadow-2xl border backdrop-blur-sm"
           style={{
-            background: t.type === "success" ? "rgba(20,83,45,0.97)" : t.type === "error" ? "rgba(127,29,29,0.97)" : "rgba(15,23,42,0.97)",
-            borderColor: t.type === "success" ? "#16a34a55" : t.type === "error" ? "#dc262655" : "#1e40af55",
-            color: t.type === "success" ? "#86efac" : t.type === "error" ? "#fca5a5" : "#93c5fd",
-            animation: "toastIn 0.25s ease",
+            background: "#0d1117",
+            border: `1px solid ${colors[t.type]}55`,
+            borderLeft: `3px solid ${colors[t.type]}`,
+            color: colors[t.type],
+            padding: "10px 16px",
+            borderRadius: 4,
+            fontSize: 12,
+            fontFamily: "'IBM Plex Mono', monospace",
+            cursor: "pointer",
+            minWidth: 280,
+            animation: "slideIn 0.2s ease",
           }}
         >
-          {t.type === "success" ? "✓ " : t.type === "error" ? "✗ " : "ℹ "}{t.msg}
+          {t.type === "success" ? "✓ " : t.type === "error" ? "✗ " : "→ "}
+          {t.msg}
         </div>
       ))}
     </div>
   );
 }
 
-// ─── Stat Card ────────────────────────────────────────────────────────────────
-function StatCard({ label, value, sub, accent, pulse }: {
-  label: string; value: any; sub?: string; accent: string; pulse?: boolean;
+// ─── Sparkline ────────────────────────────────────────────────────────────────
+function Sparkline({
+  data,
+  color,
+  height = 32,
+}: {
+  data: number[];
+  color: string;
+  height?: number;
+}) {
+  if (data.length < 2)
+    return <div style={{ height, opacity: 0.2, background: color, borderRadius: 2 }} />;
+  const max = Math.max(...data);
+  const min = Math.min(...data);
+  const range = max - min || 1;
+  const w = 80;
+  const h = height;
+  const pts = data
+    .map((v, i) => {
+      const x = (i / (data.length - 1)) * w;
+      const y = h - ((v - min) / range) * h;
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <svg width={w} height={h} style={{ overflow: "visible" }}>
+      <polyline
+        points={pts}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <polyline
+        points={`0,${h} ${pts} ${w},${h}`}
+        fill={`${color}18`}
+        stroke="none"
+      />
+    </svg>
+  );
+}
+
+// ─── Metric Card ──────────────────────────────────────────────────────────────
+function MetricCard({
+  label,
+  value,
+  sub,
+  color,
+  data,
+  pulse,
+}: {
+  label: string;
+  value: string | number;
+  sub?: string;
+  color: string;
+  data?: number[];
+  pulse?: boolean;
 }) {
   return (
-    <div className="relative rounded-2xl p-5 overflow-hidden border"
-      style={{ background: "rgba(15,23,42,0.8)", borderColor: accent + "33" }}>
-      <div className="absolute inset-0 opacity-10" style={{ background: `radial-gradient(circle at top right, ${accent}, transparent 70%)` }} />
-      {pulse && (
-        <span className="absolute top-3 right-3 flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: accent }} />
-          <span className="relative inline-flex rounded-full h-2 w-2" style={{ background: accent }} />
-        </span>
-      )}
-      <div className="relative">
-        <div className="text-2xl font-bold font-mono tracking-tight" style={{ color: accent }}>{value}</div>
-        <div className="text-xs mt-1.5" style={{ color: "#94a3b8" }}>{label}</div>
-        {sub && <div className="text-[10px] mt-0.5" style={{ color: "#475569" }}>{sub}</div>}
+    <div
+      style={{
+        background: "#0d1117",
+        border: "1px solid #1c2333",
+        borderTop: `2px solid ${color}`,
+        borderRadius: 4,
+        padding: "16px 20px",
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          bottom: 0,
+          right: 0,
+          opacity: 0.3,
+        }}
+      >
+        {data && <Sparkline data={data} color={color} />}
       </div>
-    </div>
-  );
-}
-
-// ─── Badge ────────────────────────────────────────────────────────────────────
-function Badge({ win }: { win: boolean }) {
-  return win ? (
-    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-      style={{ background: "rgba(34,197,94,0.12)", color: "#4ade80", border: "1px solid #22c55e33" }}>
-      <Icon.Trophy /> بای‌باکس
-    </span>
-  ) : (
-    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-      style={{ background: "rgba(239,68,68,0.12)", color: "#f87171", border: "1px solid #ef444433" }}>
-      <Icon.Warning /> رقابت
-    </span>
-  );
-}
-
-// ─── Formula Input ────────────────────────────────────────────────────────────
-function FormulaInput({ label, hint, value, onChange, variables, onTest, testResult, presets }: {
-  label: string; hint: string; value: string; onChange: (v: string) => void;
-  variables: string[]; onTest: () => void;
-  testResult: { success?: boolean; result?: number; error?: string } | null;
-  presets: { label: string; formula: string }[];
-}) {
-  return (
-    <div className="space-y-2">
-      <label className="text-xs font-semibold" style={{ color: "#94a3b8" }}>{label}</label>
-      <p className="text-[10px]" style={{ color: "#475569" }}>{hint}</p>
-      <div className="flex flex-wrap gap-1.5">
-        {presets.map(p => (
-          <button key={p.formula} onClick={() => onChange(p.formula)}
-            className="text-[10px] px-2 py-1 rounded-lg border transition-all"
+      <div
+        style={{
+          fontSize: 10,
+          color: "#4a5568",
+          textTransform: "uppercase",
+          letterSpacing: "0.1em",
+          fontFamily: "'IBM Plex Mono', monospace",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        {pulse && (
+          <span
             style={{
-              background: value === p.formula ? "rgba(99,102,241,0.2)" : "rgba(15,23,42,0.8)",
-              borderColor: value === p.formula ? "#6366f1" : "#1e293b",
-              color: value === p.formula ? "#a5b4fc" : "#64748b",
-            }}>
-            {p.label}
-          </button>
-        ))}
+              display: "inline-block",
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: color,
+              animation: "pulse 1.5s infinite",
+            }}
+          />
+        )}
+        {label}
       </div>
-      <div className="flex gap-2">
-        <input type="text" value={value} onChange={e => onChange(e.target.value)}
-          dir="ltr" className="flex-1 rounded-xl px-3 py-2 text-sm font-mono outline-none transition-all"
-          style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#e2e8f0" }} />
-        <button onClick={onTest}
-          className="px-3 py-2 rounded-xl text-xs font-semibold border transition-all hover:opacity-80"
-          style={{ background: "rgba(99,102,241,0.15)", border: "1px solid #6366f133", color: "#a5b4fc" }}>
-          تست
-        </button>
+      <div
+        style={{
+          fontSize: 28,
+          fontWeight: 700,
+          color: color,
+          fontFamily: "'IBM Plex Mono', monospace",
+          marginTop: 6,
+          letterSpacing: "-0.02em",
+        }}
+      >
+        {value}
       </div>
-      <div className="flex flex-wrap gap-1">
-        {variables.map(v => (
-          <code key={v} onClick={() => onChange((value ? value + " " : "") + v)}
-            className="text-[10px] px-2 py-0.5 rounded cursor-pointer transition-all hover:opacity-80"
-            style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#38bdf8" }}>
-            {v}
-          </code>
-        ))}
-      </div>
-      {testResult && (
-        <div className="text-xs px-3 py-2 rounded-xl border"
+      {sub && (
+        <div
           style={{
-            background: testResult.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
-            borderColor: testResult.success ? "#22c55e33" : "#ef444433",
-            color: testResult.success ? "#4ade80" : "#f87171",
-          }}>
-          {testResult.success ? `✓ نتیجه: ${fmtNum(testResult.result)} تومان` : `✗ ${testResult.error}`}
+            fontSize: 10,
+            color: "#4a5568",
+            marginTop: 4,
+            fontFamily: "'IBM Plex Mono', monospace",
+          }}
+        >
+          {sub}
         </div>
       )}
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── Main Component ───────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Per-Variant Bot Toggle ──────────────────────────────────────────────────
+function VariantBotToggle({
+  variant,
+  onToggle,
+}: {
+  variant: Product;
+  onToggle: (id: number, enabled: boolean) => void;
+}) {
+  const enabled = variant.enabled !== false;
+  return (
+    <button
+      onClick={() => onToggle(variant.variant_id, !enabled)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "4px 10px",
+        borderRadius: 3,
+        border: `1px solid ${enabled ? "#00ff9d44" : "#ff456044"}`,
+        background: enabled ? "#00ff9d11" : "#ff456011",
+        color: enabled ? "#00ff9d" : "#ff4560",
+        fontSize: 10,
+        fontFamily: "'IBM Plex Mono', monospace",
+        cursor: "pointer",
+        transition: "all 0.15s",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: enabled ? "#00ff9d" : "#ff4560",
+          flexShrink: 0,
+          animation: enabled ? "pulse 2s infinite" : "none",
+        }}
+      />
+      {enabled ? "فعال" : "متوقف"}
+    </button>
+  );
+}
 
+// ═══════════════════════════════════════════════════════════════════════════════
 export default function RepricerApp() {
-  // ─── State ─────────────────────────────────────────────────────────────────
   const [tab, setTab] = useState<ActiveTab>("dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
@@ -308,89 +330,114 @@ export default function RepricerApp() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [stepPrice, setStepPrice] = useState(1000);
   const [cycleDelay, setCycleDelay] = useState(120);
   const [workspaceId, setWorkspaceId] = useState(1);
   const [filter, setFilter] = useState<FilterMode>("all");
   const [search, setSearch] = useState("");
   const [discoveringId, setDiscoveringId] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [applyingFormula, setApplyingFormula] = useState(false);
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [buyboxTestResult, setBuyboxTestResult] = useState<any>(null);
-  const [minPriceTestResult, setMinPriceTestResult] = useState<any>(null);
   const [bulkMin, setBulkMin] = useState("");
   const [bulkMax, setBulkMax] = useState("");
-  const [sortBy, setSortBy] = useState<"price" | "title" | "stock" | "none">("none");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [bulkStrategy, setBulkStrategy] = useState("");
+  const [cycleHistory, setCycleHistory] = useState<number[]>([]);
   const logsRef = useRef<HTMLDivElement>(null);
 
   // ─── Toast ─────────────────────────────────────────────────────────────────
   const toast = useCallback((msg: string, type: Toast["type"] = "info") => {
     const id = ++toastId;
-    setToasts(t => [...t, { id, msg, type }]);
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500);
+    setToasts((t) => [...t, { id, msg, type }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
   }, []);
-  const removeToast = useCallback((id: number) => setToasts(t => t.filter(x => x.id !== id)), []);
+  const removeToast = useCallback(
+    (id: number) => setToasts((t) => t.filter((x) => x.id !== id)),
+    []
+  );
 
   // ─── Load Settings ─────────────────────────────────────────────────────────
   useEffect(() => {
-    fetch(`${API}/api/settings`).then(r => r.json()).then(d => {
-      if (d.settings) setSettings(d.settings);
-    }).catch(() => { });
+    fetch(`${API}/api/settings`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.settings) setSettings({ ...DEFAULT_SETTINGS, ...d.settings });
+        if (d.strategies) setStrategies(d.strategies);
+      })
+      .catch(() => {});
   }, []);
 
   // ─── Polling ───────────────────────────────────────────────────────────────
   useEffect(() => {
     const poll = setInterval(() => {
-      fetch(`${API}/api/logs?limit=200`).then(r => r.json()).then(d => {
-        setLogs(d.logs || []);
-        setIsRunning(!!d.is_running);
-        setBotState(d.bot_state || {});
-      }).catch(() => { });
+      fetch(`${API}/api/logs?limit=200`)
+        .then((r) => r.json())
+        .then((d) => {
+          setLogs(d.logs || []);
+          setIsRunning(!!d.is_running);
+          setBotState(d.bot_state || {});
+          if (d.bot_state?.cycle_count) {
+            setCycleHistory((prev) => [
+              ...prev.slice(-19),
+              d.bot_state.total_updates || 0,
+            ]);
+          }
+        })
+        .catch(() => {});
     }, 2000);
     return () => clearInterval(poll);
   }, []);
 
   useEffect(() => {
-    if (logsRef.current) logsRef.current.scrollTop = 0;
+    if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
   }, [logs]);
 
   // ─── Derived ───────────────────────────────────────────────────────────────
-  const buyboxWinners = products.filter(p => p.is_buy_box_winner).length;
-  const configured = products.filter(p => p.has_config || (p.min_price !== "" && p.max_price !== "")).length;
-  const totalStock = products.reduce((a, p) => a + (p.seller_stock || p.stock || 0), 0);
+  const buyboxWinners = products.filter((p) => p.is_buy_box_winner).length;
+  const enabledVariants = products.filter((p) => p.enabled !== false).length;
+  const disabledVariants = products.filter((p) => p.enabled === false).length;
   const uptime = botState.started_at
-    ? Math.floor((Date.now() - new Date(botState.started_at).getTime()) / 60000) : 0;
+    ? Math.floor(
+        (Date.now() - new Date(botState.started_at).getTime()) / 60000
+      )
+    : 0;
 
   const filtered = products
-    .filter(p => {
+    .filter((p) => {
       if (filter === "winning") return p.is_buy_box_winner;
       if (filter === "losing") return !p.is_buy_box_winner;
-      if (filter === "configured") return p.has_config || (p.min_price !== "" && p.max_price !== "");
-      if (filter === "unconfigured") return !p.has_config && (p.min_price === "" || p.max_price === "");
+      if (filter === "enabled") return p.enabled !== false;
+      if (filter === "disabled") return p.enabled === false;
       return true;
     })
-    .filter(p => !search || p.title?.toLowerCase().includes(search.toLowerCase()) || String(p.variant_id).includes(search))
-    .sort((a, b) => {
-      if (sortBy === "none") return 0;
-      const dir = sortDir === "asc" ? 1 : -1;
-      if (sortBy === "price") return (a.current_price - b.current_price) * dir;
-      if (sortBy === "stock") return ((a.seller_stock || a.stock) - (b.seller_stock || b.stock)) * dir;
-      if (sortBy === "title") return a.title?.localeCompare(b.title || "") * dir;
-      return 0;
-    });
+    .filter(
+      (p) =>
+        !search ||
+        p.title?.toLowerCase().includes(search.toLowerCase()) ||
+        String(p.variant_id).includes(search)
+    );
 
   // ─── Actions ───────────────────────────────────────────────────────────────
   const loadProducts = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/api/products?workspace_id=${workspaceId}`);
-      const data = await res.json();
-      setProducts(data.variants || []);
-      toast(`${data.total || 0} محصول دریافت شد`, "success");
+      const [varRes, cfgRes] = await Promise.all([
+        fetch(`${API}/api/products?workspace_id=${workspaceId}`),
+        fetch(`${API}/api/config`),
+      ]);
+      const varData = await varRes.json();
+      const cfgData = await cfgRes.json();
+      const merged = (varData.variants || []).map((v: Product) => ({
+        ...v,
+        enabled: cfgData[String(v.variant_id)]?.enabled !== false,
+        strategy: cfgData[String(v.variant_id)]?.strategy || "aggressive",
+        step: cfgData[String(v.variant_id)]?.step,
+        min_price: cfgData[String(v.variant_id)]?.min_price || v.min_price,
+        max_price: cfgData[String(v.variant_id)]?.max_price || v.max_price,
+      }));
+      setProducts(merged);
+      toast(`${varData.total || 0} تنوع دریافت شد`, "success");
     } catch {
       toast("خطا در ارتباط با سرور", "error");
     }
@@ -400,11 +447,14 @@ export default function RepricerApp() {
   const saveConfigs = async () => {
     setSaving(true);
     const configs: Record<string, any> = {};
-    products.forEach(p => {
-      if (p.min_price !== "" && p.max_price !== "") {
+    products.forEach((p) => {
+      if (p.min_price !== "" || p.max_price !== "" || p.has_config) {
         configs[String(p.variant_id)] = {
-          min_price: parseInt(String(p.min_price)),
-          max_price: parseInt(String(p.max_price)),
+          ...(p.min_price !== "" && { min_price: parseInt(String(p.min_price)) }),
+          ...(p.max_price !== "" && { max_price: parseInt(String(p.max_price)) }),
+          enabled: p.enabled !== false,
+          strategy: p.strategy || "aggressive",
+          ...(p.step && { step: p.step }),
         };
       }
     });
@@ -415,7 +465,7 @@ export default function RepricerApp() {
         body: JSON.stringify({ configs }),
       });
       const d = await res.json();
-      toast(`${d.saved_count} محصول ذخیره شد`, "success");
+      toast(`${d.saved_count} تنوع ذخیره شد`, "success");
     } catch {
       toast("خطا در ذخیره‌سازی", "error");
     }
@@ -432,7 +482,7 @@ export default function RepricerApp() {
       });
       const data = await res.json();
       if (data.status === "success") toast("تنظیمات ذخیره شد", "success");
-      else toast("خطا در ذخیره", "error");
+      else toast("خطا: " + (data.detail || "خطای سرور"), "error");
     } catch {
       toast("خطا در ارتباط با سرور", "error");
     }
@@ -442,19 +492,110 @@ export default function RepricerApp() {
   const toggleBot = async () => {
     if (isRunning) {
       await fetch(`${API}/api/bot/stop`, { method: "POST" });
-      toast("ربات متوقف شد", "info");
+      toast("ربات متوقف شد", "warn");
     } else {
       await fetch(`${API}/api/bot/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_id: workspaceId, step_price: stepPrice, cycle_delay: cycleDelay }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          cycle_delay: cycleDelay,
+        }),
       });
-      toast("ربات شروع به کار کرد", "success");
+      toast("ربات فعال شد", "success");
     }
   };
 
-  const autoDiscover = async (variant_id: number, reference_price: number, current_price: number) => {
-    if (!confirm(`کشف خودکار بازه برای تنوع ${variant_id}؟ حدود ۶۰-۹۰ ثانیه طول می‌کشد.`)) return;
+  // ─── Per-variant toggle ────────────────────────────────────────────────────
+  const toggleVariantBot = async (variantId: number, enabled: boolean) => {
+    setTogglingId(String(variantId));
+    try {
+      // Optimistic update
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.variant_id === variantId ? { ...p, enabled } : p
+        )
+      );
+      const res = await fetch(
+        `${API}/api/config/${variantId}/toggle?enabled=${enabled}`,
+        { method: "PATCH" }
+      );
+      if (!res.ok) throw new Error("API error");
+      toast(
+        `تنوع ${variantId} ${enabled ? "فعال" : "متوقف"} شد`,
+        enabled ? "success" : "warn"
+      );
+    } catch {
+      // Revert
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.variant_id === variantId ? { ...p, enabled: !enabled } : p
+        )
+      );
+      toast("خطا در تغییر وضعیت", "error");
+    }
+    setTogglingId(null);
+  };
+
+  // ─── Bulk enable/disable ───────────────────────────────────────────────────
+  const bulkToggle = async (enabled: boolean) => {
+    if (selectedIds.size === 0) {
+      toast("هیچ تنوعی انتخاب نشده", "warn");
+      return;
+    }
+    const ids = Array.from(selectedIds);
+    setProducts((prev) =>
+      prev.map((p) =>
+        selectedIds.has(p.variant_id) ? { ...p, enabled } : p
+      )
+    );
+    await Promise.all(
+      ids.map((id) =>
+        fetch(`${API}/api/config/${id}/toggle?enabled=${enabled}`, {
+          method: "PATCH",
+        }).catch(() => {})
+      )
+    );
+    toast(
+      `${ids.length} تنوع ${enabled ? "فعال" : "متوقف"} شد`,
+      enabled ? "success" : "warn"
+    );
+    setSelectedIds(new Set());
+  };
+
+  const applyBulkPrices = () => {
+    if (!bulkMin && !bulkMax && !bulkStrategy) {
+      toast("مقداری وارد کنید", "warn");
+      return;
+    }
+    setProducts((prev) =>
+      prev.map((p) => {
+        if (!selectedIds.has(p.variant_id)) return p;
+        return {
+          ...p,
+          ...(bulkMin ? { min_price: parseInt(bulkMin) } : {}),
+          ...(bulkMax ? { max_price: parseInt(bulkMax) } : {}),
+          ...(bulkStrategy ? { strategy: bulkStrategy } : {}),
+        };
+      })
+    );
+    toast(`${selectedIds.size} تنوع آپدیت شد`, "success");
+    setBulkMin("");
+    setBulkMax("");
+    setBulkStrategy("");
+  };
+
+  const autoDiscover = async (
+    variant_id: number,
+    reference_price: number,
+    current_price: number
+  ) => {
+    if (
+      !confirm(
+        `کشف خودکار بازه قیمت برای تنوع ${variant_id}؟\nحدود ۶۰-۹۰ ثانیه طول می‌کشد.`
+      )
+    )
+      return;
     setDiscoveringId(String(variant_id));
     try {
       const res = await fetch(`${API}/api/bot/discover_bounds`, {
@@ -463,17 +604,26 @@ export default function RepricerApp() {
         body: JSON.stringify({
           workspace_id: workspaceId,
           variant_id: String(variant_id),
-          reference_price: parseInt(String(reference_price)) || parseInt(String(current_price)),
+          reference_price:
+            parseInt(String(reference_price)) ||
+            parseInt(String(current_price)),
           current_price: parseInt(String(current_price)),
         }),
       });
       const data = await res.json();
       if (data.success) {
-        setProducts(prev => prev.map(p =>
-          String(p.variant_id) === String(variant_id)
-            ? { ...p, min_price: data.min_price, max_price: data.max_price, has_config: true }
-            : p
-        ));
+        setProducts((prev) =>
+          prev.map((p) =>
+            String(p.variant_id) === String(variant_id)
+              ? {
+                  ...p,
+                  min_price: data.min_price,
+                  max_price: data.max_price,
+                  has_config: true,
+                }
+              : p
+          )
+        );
         toast(`کف: ${fmtNum(data.min_price)} | سقف: ${fmtNum(data.max_price)}`, "success");
       } else {
         toast("خطا: " + data.message, "error");
@@ -484,675 +634,1793 @@ export default function RepricerApp() {
     setDiscoveringId(null);
   };
 
-  // ── Toggle variant active/inactive (API placeholder) ──────────────────────
-  // NOTE: این تابع placeholder است. وقتی API آماده شد، این قسمت رو با endpoint واقعی جایگزین کن:
-  // POST /api/variants/toggle  →  { variant_id, is_active }
-  const toggleVariantActive = async (variant_id: number, current_active: boolean) => {
-    setTogglingId(String(variant_id));
-    try {
-      // ─── PLACEHOLDER: اینجا باید API call واقعی باشه ───────────────────
-      // const res = await fetch(`${API}/api/variants/toggle`, {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify({ variant_id, is_active: !current_active, workspace_id: workspaceId }),
-      // });
-      // const data = await res.json();
-      // if (!data.success) throw new Error(data.message);
-      // ─── PLACEHOLDER END ──────────────────────────────────────────────────
-
-      // فعلا فقط state رو تغییر میدیم
-      await new Promise(r => setTimeout(r, 400)); // شبیه‌سازی تاخیر شبکه
-      setProducts(prev => prev.map(p =>
-        p.variant_id === variant_id ? { ...p, is_active: !current_active } : p
-      ));
-      toast(`تنوع ${variant_id} ${!current_active ? "فعال" : "غیرفعال"} شد`, "success");
-    } catch (e: any) {
-      toast("خطا در تغییر وضعیت: " + e.message, "error");
-    }
-    setTogglingId(null);
+  const handlePriceChange = (
+    id: number,
+    field: "min_price" | "max_price",
+    value: string
+  ) => {
+    setProducts((prev) =>
+      prev.map((p) => (p.variant_id === id ? { ...p, [field]: value } : p))
+    );
   };
 
-  // ── Bulk actions ──────────────────────────────────────────────────────────
-  const applyBulkPrices = () => {
-    if (!bulkMin && !bulkMax) { toast("حداقل یک مقدار وارد کن", "error"); return; }
-    setProducts(prev => prev.map(p => {
-      if (!selectedIds.has(p.variant_id)) return p;
-      return {
-        ...p,
-        ...(bulkMin ? { min_price: parseInt(bulkMin) } : {}),
-        ...(bulkMax ? { max_price: parseInt(bulkMax) } : {}),
-      };
-    }));
-    toast(`${selectedIds.size} محصول آپدیت شد`, "success");
-    setBulkMin(""); setBulkMax("");
+  const handleStrategyChange = (id: number, strategy: string) => {
+    setProducts((prev) =>
+      prev.map((p) => (p.variant_id === id ? { ...p, strategy } : p))
+    );
   };
 
   const selectAll = () => {
     if (selectedIds.size === filtered.length) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(filtered.map(p => p.variant_id)));
+      setSelectedIds(new Set(filtered.map((p) => p.variant_id)));
     }
   };
 
-  const applyMinFormula = async () => {
-    if (!settings.min_price_formula) { toast("فرمول کف قیمت وارد کن", "error"); return; }
-    if (!confirm(`فرمول «${settings.min_price_formula}» به همه محصولات اعمال شود؟`)) return;
-    setApplyingFormula(true);
-    try {
-      const res = await fetch(`${API}/api/bot/apply_min_formula`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_id: workspaceId, formula: settings.min_price_formula, step_price: stepPrice }),
-      });
-      const data = await res.json();
-      if (data.status === "success") {
-        toast(`${data.updated_count} محصول آپدیت شد`, "success");
-        await loadProducts();
-      } else {
-        toast("خطا: " + (data.message || JSON.stringify(data)), "error");
-      }
-    } catch {
-      toast("خطای ارتباط با سرور", "error");
-    }
-    setApplyingFormula(false);
+  const copyLogs = () => {
+    navigator.clipboard
+      .writeText(logs.join("\n"))
+      .then(() => toast("لاگ‌ها کپی شد", "success"));
   };
 
-  const testFormula = async (type: "buybox" | "min_price", formula: string) => {
-    const sampleValues = type === "buybox"
-      ? { competitor_price: 100000, reference_price: 150000, current_price: 98000, step_price: stepPrice, min_price: 70000, buy_box_price: 95000 }
-      : { reference_price: 150000, current_price: 98000, step_price: stepPrice, cost: 60000 };
-    try {
-      const res = await fetch(`${API}/api/formula/test`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ formula, formula_type: type, sample_values: sampleValues }),
-      });
-      const data = await res.json();
-      if (type === "buybox") setBuyboxTestResult(data);
-      else setMinPriceTestResult(data);
-    } catch {
-      const err = { success: false, error: "خطا در ارتباط با سرور" };
-      if (type === "buybox") setBuyboxTestResult(err);
-      else setMinPriceTestResult(err);
-    }
+  // ─── Log coloring ──────────────────────────────────────────────────────────
+  const logColor = (log: string) => {
+    if (log.includes("✅") || log.includes("موفق")) return "#00ff9d";
+    if (log.includes("❌") || log.includes("خطا")) return "#ff4560";
+    if (log.includes("⚠️")) return "#ffb700";
+    if (log.includes("429")) return "#ff7700";
+    if (log.includes("⚔️") || log.includes("→")) return "#00cfff";
+    if (log.includes("━━")) return "#2a3447";
+    if (log.includes("▶️") || log.includes("⏹")) return "#a78bfa";
+    return "#4a5568";
   };
 
-  const handlePriceChange = (id: number, field: "min_price" | "max_price", value: string) => {
-    setProducts(prev => prev.map(p => p.variant_id === id ? { ...p, [field]: value } : p));
-  };
-
-  const copyLog = () => {
-    navigator.clipboard.writeText(logs.join("\n")).then(() => toast("لاگ‌ها کپی شد", "success"));
-  };
-
-  const clearLogs = () => {
-    fetch(`${API}/api/logs`, { method: "DELETE" }).catch(() => { });
-    toast("لاگ‌ها پاک شد", "info");
-  };
-
-  // ─── Styles ────────────────────────────────────────────────────────────────
-  const styles = {
-    sidebar: { width: 220, background: "#070d1a", borderRight: "1px solid #0f1f3d" } as const,
-    main: { background: "#040b18" } as const,
-    card: { background: "rgba(15,23,42,0.7)", border: "1px solid #0f1f3d", borderRadius: 16 } as const,
-    input: { background: "#0a1628", border: "1px solid #162040", color: "#e2e8f0", borderRadius: 10, outline: "none" } as const,
-    btn: (color: string) => ({
-      background: color + "22", border: `1px solid ${color}44`, color: color,
-      borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
-    }) as const,
-    table: { width: "100%", borderCollapse: "collapse" as const },
-  };
-
-  const navItems: { id: ActiveTab; label: string; Icon: React.FC }[] = [
-    { id: "dashboard", label: "داشبورد", Icon: Icon.Dashboard },
-    { id: "products", label: "محصولات", Icon: Icon.Products },
-    { id: "settings", label: "تنظیمات", Icon: Icon.Settings },
-    { id: "logs", label: "لاگ‌ها", Icon: Icon.Logs },
+  // ─── Nav items ─────────────────────────────────────────────────────────────
+  const navItems = [
+    { id: "dashboard" as ActiveTab, label: "داشبورد", icon: "⬛" },
+    { id: "products" as ActiveTab, label: "مدیریت تنوع‌ها", icon: "◈" },
+    { id: "settings" as ActiveTab, label: "تنظیمات", icon: "◎" },
+    { id: "logs" as ActiveTab, label: "لاگ زنده", icon: "▶" },
   ];
 
-  // ─── Render helpers ────────────────────────────────────────────────────────
-  const renderDashboard = () => (
-    <div className="space-y-6">
-      {/* Bot control banner */}
-      <div className="rounded-2xl p-6 flex items-center gap-6 border"
-        style={{ background: isRunning ? "rgba(34,197,94,0.06)" : "rgba(15,23,42,0.8)", borderColor: isRunning ? "#22c55e33" : "#0f1f3d" }}>
-        <div className="flex-1">
-          <div className="flex items-center gap-3 mb-1">
-            <span className={`w-2.5 h-2.5 rounded-full ${isRunning ? "bg-green-400 animate-pulse" : "bg-slate-600"}`} />
-            <h2 className="text-base font-bold" style={{ color: isRunning ? "#4ade80" : "#94a3b8" }}>
-              {isRunning
-                ? `در حال رقابت — چرخه #${botState.cycle_count || 0} | استراتژی: ${settings.strategy_mode}`
-                : "ربات متوقف است"}
-            </h2>
-            {settings.dry_run && (
-              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold"
-                style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid #fbbf2433" }}>
-                DRY RUN
-              </span>
-            )}
-          </div>
-          <p className="text-xs" style={{ color: "#475569" }}>
-            {isRunning ? `آپ‌تایم: ${uptime} دقیقه | workspace: ${botState.workspace_id}` : "برای شروع روی دکمه کلیک کنید"}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <label className="text-[10px]" style={{ color: "#475569" }}>گام قیمت</label>
-              <input type="number" value={stepPrice} step={500}
-                onChange={e => setStepPrice(Number(e.target.value))} disabled={isRunning}
-                className="w-24 px-2 py-1 text-xs text-center"
-                style={{ ...styles.input, opacity: isRunning ? 0.5 : 1 }} />
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-[10px]" style={{ color: "#475569" }}>تاخیر (ثانیه)</label>
-              <input type="number" value={cycleDelay} step={30}
-                onChange={e => setCycleDelay(Number(e.target.value))} disabled={isRunning}
-                className="w-24 px-2 py-1 text-xs text-center"
-                style={{ ...styles.input, opacity: isRunning ? 0.5 : 1 }} />
-            </div>
-          </div>
-          <button onClick={toggleBot}
-            className="flex items-center gap-2 px-5 py-3 rounded-xl font-bold text-sm"
-            style={{
-              background: isRunning ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.15)",
-              border: `1px solid ${isRunning ? "#ef444444" : "#22c55e44"}`,
-              color: isRunning ? "#f87171" : "#4ade80",
-            }}>
-            {isRunning ? <><Icon.Stop /> توقف</> : <><Icon.Play /> شروع</>}
-          </button>
-        </div>
-      </div>
-
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-        <StatCard label="کل محصولات" value={fmtNum(products.length)} sub={`${configured} تنظیم‌شده`} accent="#38bdf8" />
-        <StatCard label="بای‌باکس" value={fmtNum(buyboxWinners)}
-          sub={fmtPct(buyboxWinners, products.length) + " نرخ برد"} accent="#4ade80" pulse={isRunning && buyboxWinners > 0} />
-        <StatCard label="در رقابت" value={fmtNum(products.length - buyboxWinners)} accent="#f87171" />
-        <StatCard label="آپدیت قیمت" value={fmtNum(botState.total_updates || 0)} sub="جلسه جاری" accent="#c084fc" />
-        <StatCard label="خطای 429" value={fmtNum(botState.rate_limit_hits || 0)} sub="محدودیت نرخ" accent="#fb923c" />
-        <StatCard label="موجودی کل" value={fmtNum(totalStock)} sub="همه محصولات" accent="#22d3ee"
-          pulse={isRunning} />
-      </div>
-
-      {/* Recent logs preview */}
-      <div className="rounded-2xl overflow-hidden border" style={styles.card}>
-        <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: "#0f1f3d" }}>
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-red-500/60" />
-            <span className="w-2 h-2 rounded-full bg-yellow-500/60" />
-            <span className="w-2 h-2 rounded-full bg-green-500/60" />
-            <span className="text-xs font-mono ml-2" style={{ color: "#475569" }}>live log</span>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={copyLog} className="text-[10px] px-2 py-1 rounded-lg flex items-center gap-1" style={styles.btn("#64748b")}>
-              <Icon.Copy /> کپی
-            </button>
-            <button onClick={clearLogs} className="text-[10px] px-2 py-1 rounded-lg flex items-center gap-1" style={styles.btn("#64748b")}>
-              <Icon.Trash /> پاک
-            </button>
-          </div>
-        </div>
-        <div ref={logsRef} className="h-52 overflow-y-auto p-4 space-y-0.5 font-mono text-xs" style={{ background: "#02060f" }}>
-          {logs.length === 0
-            ? <span style={{ color: "#1e3a5f" }}>// در انتظار لاگ...</span>
-            : logs.map((log, i) => {
-              const color = log.includes("✅") ? "#4ade80"
-                : log.includes("❌") || log.includes("⚠️") ? "#f87171"
-                  : log.includes("429") ? "#fb923c"
-                    : log.includes("⚔️") || log.includes("📈") || log.includes("💰") ? "#38bdf8"
-                      : "#475569";
-              return <div key={i} style={{ color, lineHeight: 1.6 }}>{log}</div>;
-            })}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderProducts = () => (
-    <div className="space-y-4">
-      {/* Toolbar */}
-      <div className="flex flex-wrap gap-3 items-center" style={styles.card && { padding: "16px 20px", ...styles.card }}>
-        {/* Search */}
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl flex-1" style={{ background: "#0a1628", border: "1px solid #162040", minWidth: 180 }}>
-          <Icon.Search />
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="جستجو در محصولات..." className="bg-transparent text-sm outline-none flex-1"
-            style={{ color: "#e2e8f0" }} />
-        </div>
-        {/* Filters */}
-        <div className="flex gap-1.5">
-          {([["all", "همه"], ["winning", "برنده"], ["losing", "بازنده"], ["configured", "تنظیم‌شده"], ["unconfigured", "بدون config"]] as [FilterMode, string][]).map(([k, l]) => (
-            <button key={k} onClick={() => setFilter(k)}
-              className="text-xs px-3 py-1.5 rounded-full font-medium"
-              style={{
-                background: filter === k ? "rgba(99,102,241,0.2)" : "transparent",
-                border: `1px solid ${filter === k ? "#6366f1" : "#0f1f3d"}`,
-                color: filter === k ? "#a5b4fc" : "#475569",
-              }}>{l}</button>
-          ))}
-        </div>
-        <div className="flex-1" />
-        {/* Sort */}
-        <select value={sortBy} onChange={e => setSortBy(e.target.value as any)}
-          className="text-xs px-3 py-2 rounded-xl"
-          style={{ background: "#0a1628", border: "1px solid #162040", color: "#94a3b8" }}>
-          <option value="none">ترتیب پیش‌فرض</option>
-          <option value="price">قیمت</option>
-          <option value="stock">موجودی</option>
-          <option value="title">نام</option>
-        </select>
-        <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
-          className="text-xs px-3 py-2 rounded-xl"
-          style={{ background: "#0a1628", border: "1px solid #162040", color: "#94a3b8" }}>
-          {sortDir === "asc" ? "↑ صعودی" : "↓ نزولی"}
-        </button>
-        {/* Actions */}
-        <button onClick={loadProducts} disabled={loading}
-          className="flex items-center gap-2 text-sm px-4 py-2 rounded-xl font-medium"
-          style={styles.btn("#38bdf8")}>
-          <Icon.Refresh />{loading ? "دریافت..." : "دریافت"}
-        </button>
-        <button onClick={saveConfigs} disabled={saving}
-          className="flex items-center gap-2 text-sm px-4 py-2 rounded-xl font-medium"
-          style={styles.btn("#4ade80")}>
-          <Icon.Save />{saving ? "ذخیره..." : "ذخیره"}
-        </button>
-      </div>
-
-      {/* Bulk actions bar (when something selected) */}
-      {selectedIds.size > 0 && (
-        <div className="flex items-center gap-3 px-5 py-3 rounded-xl border" style={{ background: "rgba(99,102,241,0.08)", borderColor: "#6366f133" }}>
-          <span className="text-xs font-medium" style={{ color: "#a5b4fc" }}>{selectedIds.size} انتخاب شده</span>
-          <div className="flex items-center gap-2 mr-auto">
-            <input type="number" value={bulkMin} onChange={e => setBulkMin(e.target.value)}
-              placeholder="کف جمعی" className="w-28 px-3 py-1.5 text-xs text-center"
-              style={styles.input} />
-            <input type="number" value={bulkMax} onChange={e => setBulkMax(e.target.value)}
-              placeholder="سقف جمعی" className="w-28 px-3 py-1.5 text-xs text-center"
-              style={styles.input} />
-            <button onClick={applyBulkPrices}
-              className="text-xs px-4 py-1.5 rounded-lg font-semibold"
-              style={styles.btn("#a5b4fc")}>اعمال</button>
-            <button onClick={() => setSelectedIds(new Set())}
-              className="text-xs px-3 py-1.5 rounded-lg"
-              style={styles.btn("#f87171")}>لغو</button>
-          </div>
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="rounded-2xl overflow-hidden border" style={styles.card}>
-        <div className="overflow-x-auto">
-          <table style={styles.table}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #0f1f3d", background: "rgba(15,23,42,0.5)" }}>
-                <th className="p-3 text-right">
-                  <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0}
-                    onChange={selectAll} className="w-3.5 h-3.5 rounded" />
-                </th>
-                {["وضعیت", "فعال", "کد", "نام محصول", "قیمت جاری", "مرجع", "موجودی", "کف ▼", "سقف ▲", "عملیات"].map(h => (
-                  <th key={h} className="p-3 text-right text-[11px] font-semibold" style={{ color: "#334155" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={11} className="text-center py-20 text-sm" style={{ color: "#1e3a5f" }}>
-                    {products.length === 0 ? "ابتدا محصولات را دریافت کنید" : "موردی یافت نشد"}
-                  </td>
-                </tr>
-              ) : filtered.map(p => {
-                const isDisc = discoveringId === String(p.variant_id);
-                const isToggling = togglingId === String(p.variant_id);
-                const isActive = p.is_active !== false; // default true
-                return (
-                  <tr key={p.variant_id}
-                    style={{ borderBottom: "1px solid #0a1220", opacity: isActive ? 1 : 0.45 }}
-                    className="transition-colors hover:bg-slate-900/40">
-                    <td className="p-3">
-                      <input type="checkbox" checked={selectedIds.has(p.variant_id)}
-                        onChange={() => setSelectedIds(prev => {
-                          const s = new Set(prev);
-                          s.has(p.variant_id) ? s.delete(p.variant_id) : s.add(p.variant_id);
-                          return s;
-                        })} className="w-3.5 h-3.5 rounded" />
-                    </td>
-                    <td className="p-3"><Badge win={p.is_buy_box_winner} /></td>
-                    <td className="p-3">
-                      <button onClick={() => !isToggling && toggleVariantActive(p.variant_id, isActive)}
-                        disabled={isToggling} className="transition-opacity" style={{ opacity: isToggling ? 0.5 : 1 }}>
-                        <Icon.Toggle on={isActive} />
-                      </button>
-                    </td>
-                    <td className="p-3 font-mono text-[11px]" style={{ color: "#334155" }}>{p.variant_id}</td>
-                    <td className="p-3" style={{ maxWidth: 220 }}>
-                      <span className="text-xs block truncate" style={{ color: "#94a3b8" }} title={p.title}>{p.title}</span>
-                    </td>
-                    <td className="p-3 font-mono text-sm font-bold" style={{ color: "#38bdf8" }}>{fmtNum(p.current_price)}</td>
-                    <td className="p-3 font-mono text-xs" style={{ color: "#334155" }}>{fmtNum(p.reference_price)}</td>
-                    <td className="p-3 text-xs font-mono" style={{ color: "#475569" }}>
-                      {fmtNum(p.seller_stock ?? p.stock)}
-                    </td>
-                    <td className="p-3">
-                      <input type="number" value={p.min_price} disabled={isDisc}
-                        onChange={e => handlePriceChange(p.variant_id, "min_price", e.target.value)}
-                        placeholder="کف" className="w-28 px-2 py-1.5 text-xs text-center"
-                        style={{ ...styles.input, opacity: isDisc ? 0.4 : 1 }} />
-                    </td>
-                    <td className="p-3">
-                      <input type="number" value={p.max_price} disabled={isDisc}
-                        onChange={e => handlePriceChange(p.variant_id, "max_price", e.target.value)}
-                        placeholder="سقف" className="w-28 px-2 py-1.5 text-xs text-center"
-                        style={{ ...styles.input, opacity: isDisc ? 0.4 : 1 }} />
-                    </td>
-                    <td className="p-3">
-                      <button onClick={() => autoDiscover(p.variant_id, p.reference_price, p.current_price)}
-                        disabled={isDisc || !p.current_price}
-                        className="flex items-center gap-1 text-[11px] font-semibold px-3 py-1.5 rounded-lg"
-                        style={{ background: "rgba(99,102,241,0.12)", border: "1px solid #6366f133", color: "#a5b4fc", opacity: isDisc || !p.current_price ? 0.4 : 1 }}>
-                        {isDisc ? <span className="animate-pulse">اسکن...</span> : <><Icon.Zap /> کشف</>}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <div className="px-5 py-2.5 border-t text-xs flex items-center gap-3" style={{ borderColor: "#0f1f3d", color: "#334155" }}>
-          نمایش {filtered.length} از {products.length} محصول
-          {selectedIds.size > 0 && <span style={{ color: "#6366f1" }}>— {selectedIds.size} انتخاب‌شده</span>}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderSettings = () => {
-    const BUYBOX_PRESETS = [
-      { label: "یک گام زیر رقیب", formula: "competitor_price - step_price" },
-      { label: "۱٪ زیر رقیب", formula: "competitor_price * 0.99" },
-      { label: "دو گام زیر رقیب", formula: "competitor_price - step_price * 2" },
-      { label: "زیر رقیب ≥ کف", formula: "max(competitor_price - step_price, min_price)" },
-    ];
-    const MIN_PRESETS = [
-      { label: "۷۵٪ مرجع", formula: "reference_price * 0.75" },
-      { label: "۸۰٪ مرجع", formula: "reference_price * 0.80" },
-      { label: "۷۰٪ مرجع", formula: "reference_price * 0.70" },
-      { label: "هزینه+۲۰٪", formula: "cost * 1.20" },
-    ];
-    const FORMULA_VARS_BB = ["competitor_price", "reference_price", "current_price", "step_price", "min_price", "buy_box_price"];
-    const FORMULA_VARS_MIN = ["reference_price", "current_price", "step_price", "cost"];
-
-    const set = (k: keyof Settings) => (v: any) => setSettings(s => ({ ...s, [k]: v }));
-
-    return (
-      <div className="space-y-5 max-w-3xl">
-        {/* Strategy */}
-        <div className="rounded-2xl p-5 space-y-4 border" style={styles.card}>
-          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>استراتژی رقابت</h3>
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { k: "aggressive", l: "تهاجمی", d: "همیشه یک گام زیر رقیب" },
-              { k: "conservative", l: "محافظه‌کار", d: "فقط وقتی فاصله بزرگ باشد" },
-              { k: "formula", l: "فرمول‌محور", d: "بر اساس فرمول سفارشی" },
-            ].map(s => (
-              <button key={s.k} onClick={() => set("strategy_mode")(s.k)}
-                className="p-3 rounded-xl border text-right transition-all"
-                style={{
-                  background: settings.strategy_mode === s.k ? "rgba(99,102,241,0.15)" : "#0a1628",
-                  borderColor: settings.strategy_mode === s.k ? "#6366f1" : "#162040",
-                  color: settings.strategy_mode === s.k ? "#a5b4fc" : "#475569",
-                }}>
-                <div className="font-semibold text-sm">{s.l}</div>
-                <div className="text-[10px] mt-1 opacity-70">{s.d}</div>
-              </button>
-            ))}
-          </div>
-
-          <div className={settings.strategy_mode !== "formula" ? "opacity-40 pointer-events-none" : ""}>
-            <FormulaInput label="فرمول قیمت بای‌باکس" hint="وقتی بای‌باکس نداریم، قیمت هدف را محاسبه می‌کند"
-              value={settings.buybox_formula} onChange={set("buybox_formula")}
-              variables={FORMULA_VARS_BB} presets={BUYBOX_PRESETS}
-              onTest={() => testFormula("buybox", settings.buybox_formula)} testResult={buyboxTestResult} />
-          </div>
-        </div>
-
-        {/* Min price formula */}
-        <div className="rounded-2xl p-5 space-y-4 border" style={styles.card}>
-          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>فرمول کف قیمت دسته‌جمعی</h3>
-          <FormulaInput label="فرمول کف قیمت" hint="برای محاسبه خودکار کف قیمت همه محصولات"
-            value={settings.min_price_formula} onChange={set("min_price_formula")}
-            variables={FORMULA_VARS_MIN} presets={MIN_PRESETS}
-            onTest={() => testFormula("min_price", settings.min_price_formula)} testResult={minPriceTestResult} />
-          <div className="flex items-center gap-3">
-            <button onClick={applyMinFormula} disabled={applyingFormula || !settings.min_price_formula}
-              className="text-xs px-4 py-2 rounded-xl font-semibold"
-              style={{ ...styles.btn("#c084fc"), opacity: applyingFormula || !settings.min_price_formula ? 0.4 : 1 }}>
-              {applyingFormula ? "در حال اعمال..." : "اعمال به همه محصولات"}
-            </button>
-            <p className="text-[10px]" style={{ color: "#334155" }}>قیمت دیجی‌کالا تغییر نمی‌کند — فقط config ذخیره می‌شود</p>
-          </div>
-        </div>
-
-        {/* Advanced settings */}
-        <div className="rounded-2xl p-5 space-y-5 border" style={styles.card}>
-          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>تنظیمات پیشرفته</h3>
-
-          {/* Guard rails */}
-          <div className="grid grid-cols-2 gap-4">
-            {[
-              { k: "variant_cooldown_seconds", l: "Cooldown هر تنوع (ثانیه)", type: "number" },
-              { k: "max_price_change_percent", l: "حداکثر تغییر قیمت (%)", type: "number", step: 0.5 },
-              { k: "max_consecutive_failures", l: "حداکثر خطای متوالی", type: "number" },
-              { k: "rate_limit_pause_seconds", l: "مکث بعد از 429 (ثانیه)", type: "number" },
-            ].map(f => (
-              <div key={f.k} className="space-y-1">
-                <label className="text-[11px]" style={{ color: "#475569" }}>{f.l}</label>
-                <input type={f.type} value={(settings as any)[f.k]} step={(f as any).step || 1}
-                  onChange={e => set(f.k as keyof Settings)(Number(e.target.value))}
-                  className="w-full px-3 py-2 text-sm" style={styles.input} />
-              </div>
-            ))}
-          </div>
-
-          {/* Timing */}
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { k: "request_delay_min", l: "تاخیر کمینه (ثانیه)", step: 0.5 },
-              { k: "request_delay_max", l: "تاخیر بیشینه (ثانیه)", step: 0.5 },
-              { k: "rate_limit_backoff_base", l: "پایه backoff 429", step: 5 },
-            ].map(f => (
-              <div key={f.k} className="space-y-1">
-                <label className="text-[11px]" style={{ color: "#475569" }}>{f.l}</label>
-                <input type="number" value={(settings as any)[f.k]} step={f.step}
-                  onChange={e => set(f.k as keyof Settings)(Number(e.target.value))}
-                  className="w-full px-3 py-2 text-sm" style={styles.input} />
-              </div>
-            ))}
-          </div>
-
-          {/* Delivery */}
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-1">
-              <label className="text-[11px]" style={{ color: "#475569" }}>مدت تحویل (روز)</label>
-              <input type="number" min={1} value={settings.lead_time}
-                onChange={e => set("lead_time")(Number(e.target.value))}
-                className="w-full px-3 py-2 text-sm" style={styles.input} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[11px]" style={{ color: "#475569" }}>حداکثر سفارش</label>
-              <input type="number" min={1} value={settings.max_per_order}
-                onChange={e => set("max_per_order")(Number(e.target.value))}
-                className="w-full px-3 py-2 text-sm" style={styles.input} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[11px]" style={{ color: "#475569" }}>نوع ارسال</label>
-              <select value={settings.shipping_type} onChange={e => set("shipping_type")(e.target.value)}
-                className="w-full px-3 py-2 text-sm" style={styles.input}>
-                <option value="seller">فروشنده</option>
-                <option value="digikala">دیجی‌کالا</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Toggles */}
-          <div className="flex gap-6">
-            <label className="flex items-center gap-3 cursor-pointer">
-              <button onClick={() => set("dry_run")(!settings.dry_run)}>
-                <Icon.Toggle on={settings.dry_run} />
-              </button>
-              <div>
-                <div className="text-xs font-semibold" style={{ color: "#94a3b8" }}>حالت آزمایشی (Dry Run)</div>
-                <div className="text-[10px]" style={{ color: "#334155" }}>قیمت ارسال نمی‌شود</div>
-              </div>
-            </label>
-          </div>
-
-          {/* Webhook */}
-          <div className="space-y-1">
-            <label className="text-[11px]" style={{ color: "#475569" }}>Webhook هشدار (اختیاری)</label>
-            <input type="url" value={settings.notify_webhook_url} dir="ltr"
-              onChange={e => set("notify_webhook_url")(e.target.value)}
-              placeholder="https://hooks.slack.com/..."
-              className="w-full px-3 py-2 text-sm font-mono" style={styles.input} />
-          </div>
-
-          <div className="flex justify-end pt-2">
-            <button onClick={saveSettings} disabled={savingSettings}
-              className="flex items-center gap-2 text-sm font-bold px-6 py-2.5 rounded-xl"
-              style={styles.btn("#4ade80")}>
-              <Icon.Save />{savingSettings ? "در حال ذخیره..." : "ذخیره تنظیمات"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
+  const strategyColor: Record<string, string> = {
+    aggressive: "#ff4560",
+    conservative: "#00cfff",
+    step_up: "#ffb700",
+  };
+  const strategyLabel: Record<string, string> = {
+    aggressive: "تهاجمی",
+    conservative: "محافظه",
+    step_up: "سود-محور",
   };
 
-  const renderLogs = () => (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <h3 className="text-sm font-semibold" style={{ color: "#94a3b8" }}>لاگ‌های زنده</h3>
-        <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#0a1628", color: "#475569" }}>
-          {logs.length} خط
-        </span>
-        <div className="flex gap-2 mr-auto">
-          <button onClick={copyLog} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={styles.btn("#64748b")}>
-            <Icon.Copy /> کپی
-          </button>
-          <button onClick={clearLogs} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={styles.btn("#f87171")}>
-            <Icon.Trash /> پاک
-          </button>
-        </div>
-      </div>
-      <div className="rounded-2xl overflow-hidden border" style={{ ...styles.card, background: "#02060f" }}>
-        <div ref={logsRef} className="h-[calc(100vh-240px)] overflow-y-auto p-5 space-y-0.5 font-mono text-xs">
-          {logs.length === 0
-            ? <span style={{ color: "#1e3a5f" }}>// در انتظار لاگ...</span>
-            : logs.map((log, i) => {
-              const color = log.includes("✅") ? "#4ade80"
-                : log.includes("❌") ? "#f87171"
-                  : log.includes("⚠️") ? "#fbbf24"
-                    : log.includes("429") ? "#fb923c"
-                      : log.includes("⚔️") || log.includes("📈") || log.includes("💰") ? "#38bdf8"
-                        : log.includes("━━") ? "#1e3a5f"
-                          : "#334155";
-              return (
-                <div key={i} style={{ color, lineHeight: 1.7 }}>{log}</div>
-              );
-            })}
-        </div>
-      </div>
-    </div>
-  );
-
-  // ─── Layout ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-screen overflow-hidden" dir="rtl" style={{ fontFamily: "'Vazirmatn', 'Tahoma', sans-serif", ...styles.main }}>
+    <div
+      dir="rtl"
+      style={{
+        display: "flex",
+        height: "100vh",
+        overflow: "hidden",
+        background: "#070c15",
+        fontFamily: "'Vazirmatn', 'Tahoma', sans-serif",
+      }}
+    >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #162040; border-radius: 4px; }
-        @keyframes toastIn { from { opacity:0; transform: translateY(-8px) scale(0.97); } to { opacity:1; transform: none; } }
-        input[type=number]::-webkit-inner-spin-button { opacity:0.3; }
-        select option { background: #0a1628; }
+        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 3px; height: 3px; }
+        ::-webkit-scrollbar-track { background: #070c15; }
+        ::-webkit-scrollbar-thumb { background: #1c2333; }
+        input, select { outline: none; }
+        input[type=number]::-webkit-inner-spin-button { opacity: 0; }
+        select option { background: #0d1117; color: #e2e8f0; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+        @keyframes scanline {
+          0% { transform: translateY(-100%); }
+          100% { transform: translateY(100vh); }
+        }
       `}</style>
 
       <ToastContainer toasts={toasts} remove={removeToast} />
 
-      {/* Sidebar */}
-      <aside className="flex flex-col py-6 gap-1" style={styles.sidebar}>
+      {/* ─── Sidebar ─────────────────────────────────────────────────────────── */}
+      <aside
+        style={{
+          width: 220,
+          background: "#0d1117",
+          borderLeft: "1px solid #1c2333",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+        }}
+      >
         {/* Logo */}
-        <div className="px-5 mb-6">
-          <div className="text-lg font-bold tracking-tight" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-            <span style={{ color: "#38bdf8" }}>DK</span>
-            <span style={{ color: "#334155" }}>_</span>
-            <span style={{ color: "#475569" }}>Repricer</span>
+        <div
+          style={{
+            padding: "24px 20px 16px",
+            borderBottom: "1px solid #1c2333",
+          }}
+        >
+          <div
+            style={{
+              fontFamily: "'IBM Plex Mono', monospace",
+              fontSize: 15,
+              fontWeight: 600,
+              letterSpacing: "0.05em",
+            }}
+          >
+            <span style={{ color: "#ff4560" }}>DK</span>
+            <span style={{ color: "#1c2333" }}>::</span>
+            <span style={{ color: "#00ff9d" }}>bot</span>
           </div>
-          <div className="text-[10px] mt-0.5" style={{ color: "#1e3a5f" }}>v4.0 — production</div>
+          <div
+            style={{
+              fontSize: 9,
+              color: "#2a3447",
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginTop: 3,
+              letterSpacing: "0.1em",
+            }}
+          >
+            REPRICER v4.0
+          </div>
+        </div>
+
+        {/* Bot status pill */}
+        <div style={{ padding: "12px 16px", borderBottom: "1px solid #1c2333" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              background: isRunning ? "#00ff9d08" : "#0d1117",
+              border: `1px solid ${isRunning ? "#00ff9d22" : "#1c2333"}`,
+              borderRadius: 3,
+            }}
+          >
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: isRunning ? "#00ff9d" : "#1c2333",
+                flexShrink: 0,
+                animation: isRunning ? "pulse 1.5s infinite" : "none",
+              }}
+            />
+            <div>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: isRunning ? "#00ff9d" : "#2a3447",
+                  fontFamily: "'IBM Plex Mono', monospace",
+                }}
+              >
+                {isRunning ? "در حال اجرا" : "متوقف"}
+              </div>
+              {isRunning && (
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: "#4a5568",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    marginTop: 2,
+                  }}
+                >
+                  چرخه #{botState.cycle_count || 0} | {uptime}m
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Nav */}
-        {navItems.map(item => (
-          <button key={item.id} onClick={() => setTab(item.id)}
-            className="flex items-center gap-3 mx-3 px-4 py-2.5 rounded-xl text-sm font-medium text-right transition-all"
+        <nav style={{ flex: 1, padding: "8px 0" }}>
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setTab(item.id)}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 20px",
+                background: tab === item.id ? "#131b2e" : "transparent",
+                border: "none",
+                borderRight: `2px solid ${tab === item.id ? "#00cfff" : "transparent"}`,
+                color: tab === item.id ? "#00cfff" : "#4a5568",
+                fontSize: 13,
+                cursor: "pointer",
+                textAlign: "right",
+                transition: "all 0.15s",
+                fontFamily: "'Vazirmatn', sans-serif",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  fontSize: 14,
+                  color: tab === item.id ? "#00cfff" : "#2a3447",
+                }}
+              >
+                {item.icon}
+              </span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* Workspace + Controls */}
+        <div
+          style={{
+            padding: "16px",
+            borderTop: "1px solid #1c2333",
+          }}
+        >
+          <div
             style={{
-              background: tab === item.id ? "rgba(56,189,248,0.1)" : "transparent",
-              color: tab === item.id ? "#38bdf8" : "#334155",
-              borderLeft: tab === item.id ? "2px solid #38bdf8" : "2px solid transparent",
-            }}>
-            <item.Icon />
-            {item.label}
+              fontSize: 9,
+              color: "#2a3447",
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginBottom: 6,
+            }}
+          >
+            WORKSPACE
+          </div>
+          <input
+            type="number"
+            value={workspaceId}
+            min={1}
+            onChange={(e) => setWorkspaceId(Number(e.target.value))}
+            style={{
+              width: "100%",
+              background: "#070c15",
+              border: "1px solid #1c2333",
+              color: "#4a5568",
+              borderRadius: 3,
+              padding: "6px 10px",
+              fontSize: 12,
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginBottom: 10,
+            }}
+          />
+
+          <div
+            style={{
+              fontSize: 9,
+              color: "#2a3447",
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginBottom: 6,
+            }}
+          >
+            DELAY (ثانیه)
+          </div>
+          <input
+            type="number"
+            value={cycleDelay}
+            min={30}
+            step={30}
+            disabled={isRunning}
+            onChange={(e) => setCycleDelay(Number(e.target.value))}
+            style={{
+              width: "100%",
+              background: "#070c15",
+              border: "1px solid #1c2333",
+              color: "#4a5568",
+              borderRadius: 3,
+              padding: "6px 10px",
+              fontSize: 12,
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginBottom: 12,
+              opacity: isRunning ? 0.4 : 1,
+            }}
+          />
+
+          <button
+            onClick={toggleBot}
+            style={{
+              width: "100%",
+              padding: "10px",
+              borderRadius: 3,
+              border: `1px solid ${isRunning ? "#ff456044" : "#00ff9d44"}`,
+              background: isRunning ? "#ff456011" : "#00ff9d11",
+              color: isRunning ? "#ff4560" : "#00ff9d",
+              fontSize: 12,
+              fontWeight: 700,
+              fontFamily: "'IBM Plex Mono', monospace",
+              cursor: "pointer",
+              letterSpacing: "0.05em",
+            }}
+          >
+            {isRunning ? "■ STOP" : "▶ START"}
           </button>
-        ))}
-
-        {/* Workspace select */}
-        <div className="mt-auto px-4 space-y-1">
-          <label className="text-[10px]" style={{ color: "#1e3a5f" }}>Workspace</label>
-          <input type="number" value={workspaceId} min={1}
-            onChange={e => setWorkspaceId(Number(e.target.value))}
-            className="w-full px-3 py-1.5 text-xs text-center rounded-lg"
-            style={{ background: "#040b18", border: "1px solid #0f1f3d", color: "#334155" }} />
-        </div>
-
-        {/* Bot status badge */}
-        <div className="mx-4 mt-2 px-3 py-2 rounded-xl flex items-center gap-2"
-          style={{ background: isRunning ? "rgba(34,197,94,0.06)" : "#040b18", border: `1px solid ${isRunning ? "#22c55e22" : "#0f1f3d"}` }}>
-          <span className={`w-1.5 h-1.5 rounded-full ${isRunning ? "bg-green-400 animate-pulse" : "bg-slate-700"}`} />
-          <span className="text-[10px] font-medium" style={{ color: isRunning ? "#4ade80" : "#1e3a5f" }}>
-            {isRunning ? `چرخه #${botState.cycle_count || 0}` : "متوقف"}
-          </span>
         </div>
       </aside>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-auto p-7">
-        {/* Page header */}
-        <div className="flex items-center justify-between mb-6">
+      {/* ─── Main ───────────────────────────────────────────────────────────── */}
+      <main
+        style={{
+          flex: 1,
+          overflow: "auto",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* Top bar */}
+        <header
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "14px 28px",
+            borderBottom: "1px solid #1c2333",
+            background: "#0d1117",
+            flexShrink: 0,
+          }}
+        >
           <div>
-            <h1 className="text-lg font-bold" style={{ color: "#e2e8f0" }}>
-              {navItems.find(n => n.id === tab)?.label}
+            <h1
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                color: "#e2e8f0",
+                letterSpacing: "0.02em",
+              }}
+            >
+              {navItems.find((n) => n.id === tab)?.label}
             </h1>
-            <p className="text-xs mt-0.5" style={{ color: "#334155" }}>
-              {tab === "dashboard" && "نمای کلی سیستم قیمت‌گذاری"}
-              {tab === "products" && `${products.length} محصول فعال | ${configured} تنظیم‌شده`}
-              {tab === "settings" && "پیکربندی پیشرفته ربات"}
-              {tab === "logs" && "لاگ‌های زنده سیستم"}
-            </p>
+            <div
+              style={{
+                fontSize: 10,
+                color: "#2a3447",
+                fontFamily: "'IBM Plex Mono', monospace",
+                marginTop: 3,
+              }}
+            >
+              {tab === "products" &&
+                `${products.length} تنوع | ${enabledVariants} فعال | ${disabledVariants} متوقف`}
+              {tab === "dashboard" &&
+                `workspace: ${workspaceId} | ${isRunning ? "در حال اجرا" : "متوقف"}`}
+              {tab === "settings" && "پیکربندی ربات"}
+              {tab === "logs" && `${logs.length} خط لاگ`}
+            </div>
           </div>
-        </div>
+          {settings.dry_run && (
+            <div
+              style={{
+                padding: "4px 10px",
+                background: "#ffb70011",
+                border: "1px solid #ffb70044",
+                borderRadius: 3,
+                color: "#ffb700",
+                fontSize: 10,
+                fontFamily: "'IBM Plex Mono', monospace",
+                letterSpacing: "0.1em",
+              }}
+            >
+              ◈ DRY RUN MODE
+            </div>
+          )}
+        </header>
 
-        {tab === "dashboard" && renderDashboard()}
-        {tab === "products" && renderProducts()}
-        {tab === "settings" && renderSettings()}
-        {tab === "logs" && renderLogs()}
+        <div style={{ flex: 1, overflow: "auto", padding: 28 }}>
+          {/* ═══ DASHBOARD ══════════════════════════════════════════════════════ */}
+          {tab === "dashboard" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+              {/* Metrics */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                  gap: 12,
+                }}
+              >
+                <MetricCard
+                  label="کل تنوع‌ها"
+                  value={products.length}
+                  sub={`${enabledVariants} فعال در ربات`}
+                  color="#00cfff"
+                  data={[products.length]}
+                />
+                <MetricCard
+                  label="بای‌باکس"
+                  value={buyboxWinners}
+                  sub={
+                    products.length > 0
+                      ? `${Math.round((buyboxWinners / products.length) * 100)}% نرخ برد`
+                      : "—"
+                  }
+                  color="#00ff9d"
+                  pulse={isRunning}
+                  data={cycleHistory}
+                />
+                <MetricCard
+                  label="آپدیت قیمت"
+                  value={botState.total_updates || 0}
+                  sub="این جلسه"
+                  color="#a78bfa"
+                  pulse={isRunning}
+                  data={cycleHistory}
+                />
+                <MetricCard
+                  label="خطای 429"
+                  value={botState.rate_limit_hits || 0}
+                  sub="محدودیت نرخ"
+                  color="#ff7700"
+                />
+                <MetricCard
+                  label="چرخه‌ها"
+                  value={botState.cycle_count || 0}
+                  sub={isRunning ? `${uptime} دقیقه آپ‌تایم` : "متوقف"}
+                  color={isRunning ? "#00ff9d" : "#2a3447"}
+                  pulse={isRunning}
+                />
+                <MetricCard
+                  label="تنوع‌های غیرفعال"
+                  value={disabledVariants}
+                  sub="توقف دستی"
+                  color="#ff4560"
+                />
+              </div>
+
+              {/* Quick actions */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 12,
+                }}
+              >
+                <div
+                  style={{
+                    background: "#0d1117",
+                    border: "1px solid #1c2333",
+                    borderRadius: 4,
+                    padding: 20,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "#4a5568",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      letterSpacing: "0.1em",
+                      marginBottom: 16,
+                    }}
+                  >
+                    QUICK ACTIONS
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <button
+                      onClick={loadProducts}
+                      disabled={loading}
+                      style={{
+                        padding: "10px 16px",
+                        background: "#00cfff11",
+                        border: "1px solid #00cfff33",
+                        borderRadius: 3,
+                        color: "#00cfff",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        textAlign: "right",
+                      }}
+                    >
+                      {loading ? "در حال دریافت..." : "↓ دریافت تنوع‌ها از دیجی‌کالا"}
+                    </button>
+                    <button
+                      onClick={() => setTab("products")}
+                      style={{
+                        padding: "10px 16px",
+                        background: "#a78bfa11",
+                        border: "1px solid #a78bfa33",
+                        borderRadius: 3,
+                        color: "#a78bfa",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        textAlign: "right",
+                      }}
+                    >
+                      ◈ مدیریت تنوع‌ها و کنترل ربات
+                    </button>
+                    <button
+                      onClick={() => setTab("logs")}
+                      style={{
+                        padding: "10px 16px",
+                        background: "#00ff9d11",
+                        border: "1px solid #00ff9d33",
+                        borderRadius: 3,
+                        color: "#00ff9d",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        textAlign: "right",
+                      }}
+                    >
+                      ▶ مشاهده لاگ‌های زنده
+                    </button>
+                  </div>
+                </div>
+
+                {/* Mini log */}
+                <div
+                  style={{
+                    background: "#070c15",
+                    border: "1px solid #1c2333",
+                    borderRadius: 4,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "12px 16px",
+                      borderBottom: "1px solid #1c2333",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <span
+                      style={{ width: 6, height: 6, borderRadius: "50%", background: "#ff4560" }}
+                    />
+                    <span
+                      style={{ width: 6, height: 6, borderRadius: "50%", background: "#ffb700" }}
+                    />
+                    <span
+                      style={{ width: 6, height: 6, borderRadius: "50%", background: "#00ff9d" }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: "#2a3447",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        marginRight: 8,
+                      }}
+                    >
+                      LIVE LOG
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      height: 180,
+                      overflow: "hidden",
+                      padding: "8px 16px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "flex-end",
+                    }}
+                  >
+                    {logs.slice(-8).map((log, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          fontSize: 10,
+                          color: logColor(log),
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          lineHeight: 1.8,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {log}
+                      </div>
+                    ))}
+                    {logs.length === 0 && (
+                      <div
+                        style={{
+                          fontSize: 10,
+                          color: "#1c2333",
+                          fontFamily: "'IBM Plex Mono', monospace",
+                        }}
+                      >
+                        // در انتظار لاگ...
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Strategy distribution */}
+              {products.length > 0 && (
+                <div
+                  style={{
+                    background: "#0d1117",
+                    border: "1px solid #1c2333",
+                    borderRadius: 4,
+                    padding: 20,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "#4a5568",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      letterSpacing: "0.1em",
+                      marginBottom: 16,
+                    }}
+                  >
+                    توزیع استراتژی
+                  </div>
+                  <div style={{ display: "flex", gap: 24 }}>
+                    {Object.entries(strategyLabel).map(([key, label]) => {
+                      const count = products.filter(
+                        (p) => (p.strategy || "aggressive") === key
+                      ).length;
+                      const pct =
+                        products.length > 0
+                          ? Math.round((count / products.length) * 100)
+                          : 0;
+                      return (
+                        <div key={key} style={{ flex: 1 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 6,
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: strategyColor[key],
+                                fontFamily: "'IBM Plex Mono', monospace",
+                              }}
+                            >
+                              {label}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: "#4a5568",
+                                fontFamily: "'IBM Plex Mono', monospace",
+                              }}
+                            >
+                              {count}
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              height: 3,
+                              background: "#1c2333",
+                              borderRadius: 2,
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: "100%",
+                                width: `${pct}%`,
+                                background: strategyColor[key],
+                                borderRadius: 2,
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══ PRODUCTS ═══════════════════════════════════════════════════════ */}
+          {tab === "products" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {/* Toolbar */}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 8,
+                  alignItems: "center",
+                  background: "#0d1117",
+                  border: "1px solid #1c2333",
+                  borderRadius: 4,
+                  padding: "12px 16px",
+                }}
+              >
+                {/* Search */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    background: "#070c15",
+                    border: "1px solid #1c2333",
+                    borderRadius: 3,
+                    padding: "6px 12px",
+                    flex: 1,
+                    minWidth: 180,
+                  }}
+                >
+                  <span style={{ fontSize: 10, color: "#2a3447" }}>⌕</span>
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="جستجو در تنوع‌ها..."
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      color: "#e2e8f0",
+                      fontSize: 12,
+                      flex: 1,
+                    }}
+                  />
+                </div>
+
+                {/* Filters */}
+                {(
+                  [
+                    ["all", "همه"],
+                    ["enabled", "فعال"],
+                    ["disabled", "متوقف"],
+                    ["winning", "برنده"],
+                    ["losing", "بازنده"],
+                  ] as [FilterMode, string][]
+                ).map(([k, l]) => (
+                  <button
+                    key={k}
+                    onClick={() => setFilter(k)}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: 3,
+                      border: `1px solid ${filter === k ? "#00cfff44" : "#1c2333"}`,
+                      background: filter === k ? "#00cfff11" : "transparent",
+                      color: filter === k ? "#00cfff" : "#4a5568",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    {l}
+                  </button>
+                ))}
+
+                <div style={{ flex: 1 }} />
+
+                <button
+                  onClick={loadProducts}
+                  disabled={loading}
+                  style={{
+                    padding: "7px 14px",
+                    borderRadius: 3,
+                    border: "1px solid #00cfff44",
+                    background: "#00cfff11",
+                    color: "#00cfff",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                >
+                  {loading ? "..." : "↓ دریافت"}
+                </button>
+                <button
+                  onClick={saveConfigs}
+                  disabled={saving}
+                  style={{
+                    padding: "7px 14px",
+                    borderRadius: 3,
+                    border: "1px solid #00ff9d44",
+                    background: "#00ff9d11",
+                    color: "#00ff9d",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                >
+                  {saving ? "..." : "↑ ذخیره"}
+                </button>
+              </div>
+
+              {/* Bulk actions */}
+              {selectedIds.size > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 16px",
+                    background: "#00cfff08",
+                    border: "1px solid #00cfff22",
+                    borderRadius: 4,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: "#00cfff",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    {selectedIds.size} انتخاب‌شده
+                  </span>
+
+                  <button
+                    onClick={() => bulkToggle(true)}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: 3,
+                      border: "1px solid #00ff9d44",
+                      background: "#00ff9d11",
+                      color: "#00ff9d",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    ▶ فعال‌سازی همه
+                  </button>
+                  <button
+                    onClick={() => bulkToggle(false)}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: 3,
+                      border: "1px solid #ff456044",
+                      background: "#ff456011",
+                      color: "#ff4560",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    ■ توقف همه
+                  </button>
+
+                  <div style={{ width: 1, height: 20, background: "#1c2333" }} />
+
+                  <input
+                    type="number"
+                    value={bulkMin}
+                    onChange={(e) => setBulkMin(e.target.value)}
+                    placeholder="کف قیمت"
+                    style={{
+                      width: 110,
+                      padding: "5px 8px",
+                      background: "#070c15",
+                      border: "1px solid #1c2333",
+                      borderRadius: 3,
+                      color: "#e2e8f0",
+                      fontSize: 11,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  />
+                  <input
+                    type="number"
+                    value={bulkMax}
+                    onChange={(e) => setBulkMax(e.target.value)}
+                    placeholder="سقف قیمت"
+                    style={{
+                      width: 110,
+                      padding: "5px 8px",
+                      background: "#070c15",
+                      border: "1px solid #1c2333",
+                      borderRadius: 3,
+                      color: "#e2e8f0",
+                      fontSize: 11,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  />
+                  <select
+                    value={bulkStrategy}
+                    onChange={(e) => setBulkStrategy(e.target.value)}
+                    style={{
+                      padding: "5px 8px",
+                      background: "#070c15",
+                      border: "1px solid #1c2333",
+                      borderRadius: 3,
+                      color: "#e2e8f0",
+                      fontSize: 11,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    <option value="">استراتژی...</option>
+                    <option value="aggressive">تهاجمی</option>
+                    <option value="conservative">محافظه‌کار</option>
+                    <option value="step_up">سود-محور</option>
+                  </select>
+                  <button
+                    onClick={applyBulkPrices}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: 3,
+                      border: "1px solid #a78bfa44",
+                      background: "#a78bfa11",
+                      color: "#a78bfa",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    اعمال
+                  </button>
+                  <button
+                    onClick={() => setSelectedIds(new Set())}
+                    style={{
+                      padding: "5px 10px",
+                      borderRadius: 3,
+                      border: "1px solid #1c2333",
+                      background: "transparent",
+                      color: "#4a5568",
+                      fontSize: 11,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Table */}
+              <div
+                style={{
+                  background: "#0d1117",
+                  border: "1px solid #1c2333",
+                  borderRadius: 4,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ overflowX: "auto" }}>
+                  <table
+                    style={{
+                      width: "100%",
+                      borderCollapse: "collapse",
+                      fontSize: 12,
+                    }}
+                  >
+                    <thead>
+                      <tr
+                        style={{
+                          background: "#070c15",
+                          borderBottom: "1px solid #1c2333",
+                        }}
+                      >
+                        <th style={thStyle}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              selectedIds.size === filtered.length &&
+                              filtered.length > 0
+                            }
+                            onChange={selectAll}
+                          />
+                        </th>
+                        <th style={thStyle}>ربات</th>
+                        <th style={thStyle}>وضعیت</th>
+                        <th style={thStyle}>کد تنوع</th>
+                        <th style={{ ...thStyle, textAlign: "right", minWidth: 200 }}>
+                          نام محصول
+                        </th>
+                        <th style={thStyle}>قیمت جاری</th>
+                        <th style={thStyle}>بای‌باکس</th>
+                        <th style={thStyle}>موجودی</th>
+                        <th style={thStyle}>کف قیمت</th>
+                        <th style={thStyle}>سقف قیمت</th>
+                        <th style={thStyle}>استراتژی</th>
+                        <th style={thStyle}>کشف بازه</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={12}
+                            style={{
+                              textAlign: "center",
+                              padding: 48,
+                              color: "#1c2333",
+                              fontFamily: "'IBM Plex Mono', monospace",
+                              fontSize: 12,
+                            }}
+                          >
+                            {products.length === 0
+                              ? "// ابتدا تنوع‌ها را دریافت کنید"
+                              : "// موردی یافت نشد"}
+                          </td>
+                        </tr>
+                      ) : (
+                        filtered.map((p) => {
+                          const enabled = p.enabled !== false;
+                          const isDisc = discoveringId === String(p.variant_id);
+                          const isToggling =
+                            togglingId === String(p.variant_id);
+                          const strat = p.strategy || "aggressive";
+
+                          return (
+                            <tr
+                              key={p.variant_id}
+                              style={{
+                                borderBottom: "1px solid #0d1117",
+                                opacity: enabled ? 1 : 0.45,
+                                background: enabled
+                                  ? "transparent"
+                                  : "#ff456005",
+                                transition: "opacity 0.2s",
+                              }}
+                            >
+                              <td style={tdStyle}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedIds.has(p.variant_id)}
+                                  onChange={() =>
+                                    setSelectedIds((prev) => {
+                                      const s = new Set(prev);
+                                      s.has(p.variant_id)
+                                        ? s.delete(p.variant_id)
+                                        : s.add(p.variant_id);
+                                      return s;
+                                    })
+                                  }
+                                />
+                              </td>
+
+                              {/* BOT TOGGLE — core feature */}
+                              <td style={tdStyle}>
+                                <div
+                                  style={{
+                                    opacity: isToggling ? 0.5 : 1,
+                                    pointerEvents: isToggling ? "none" : "auto",
+                                  }}
+                                >
+                                  <VariantBotToggle
+                                    variant={p}
+                                    onToggle={toggleVariantBot}
+                                  />
+                                </div>
+                              </td>
+
+                              <td style={tdStyle}>
+                                {p.is_buy_box_winner ? (
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#00ff9d",
+                                      fontFamily: "'IBM Plex Mono', monospace",
+                                    }}
+                                  >
+                                    ◆ WIN
+                                  </span>
+                                ) : (
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#ff4560",
+                                      fontFamily: "'IBM Plex Mono', monospace",
+                                    }}
+                                  >
+                                    ◇ LOSE
+                                  </span>
+                                )}
+                              </td>
+
+                              <td style={tdStyle}>
+                                <span
+                                  style={{
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    fontSize: 11,
+                                    color: "#2a3447",
+                                  }}
+                                >
+                                  {p.variant_id}
+                                </span>
+                              </td>
+
+                              <td
+                                style={{
+                                  ...tdStyle,
+                                  textAlign: "right",
+                                  maxWidth: 200,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "block",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                    color: "#94a3b8",
+                                    fontSize: 12,
+                                  }}
+                                  title={p.title}
+                                >
+                                  {p.title}
+                                </span>
+                              </td>
+
+                              <td style={tdStyle}>
+                                <span
+                                  style={{
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    color: "#00cfff",
+                                    fontWeight: 600,
+                                    fontSize: 12,
+                                  }}
+                                >
+                                  {fmtNum(p.current_price)}
+                                </span>
+                              </td>
+
+                              <td style={tdStyle}>
+                                <span
+                                  style={{
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    color: "#4a5568",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  {p.buy_box_price ? fmtNum(p.buy_box_price) : "—"}
+                                </span>
+                              </td>
+
+                              <td style={tdStyle}>
+                                <span
+                                  style={{
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    color: "#4a5568",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  {fmtNum(p.seller_stock ?? p.stock)}
+                                </span>
+                              </td>
+
+                              <td style={tdStyle}>
+                                <input
+                                  type="number"
+                                  value={p.min_price}
+                                  disabled={isDisc}
+                                  onChange={(e) =>
+                                    handlePriceChange(
+                                      p.variant_id,
+                                      "min_price",
+                                      e.target.value
+                                    )
+                                  }
+                                  placeholder="کف"
+                                  style={{
+                                    width: 100,
+                                    padding: "4px 8px",
+                                    background: "#070c15",
+                                    border: "1px solid #1c2333",
+                                    borderRadius: 3,
+                                    color: p.min_price ? "#00ff9d" : "#2a3447",
+                                    fontSize: 11,
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    opacity: isDisc ? 0.4 : 1,
+                                  }}
+                                />
+                              </td>
+
+                              <td style={tdStyle}>
+                                <input
+                                  type="number"
+                                  value={p.max_price}
+                                  disabled={isDisc}
+                                  onChange={(e) =>
+                                    handlePriceChange(
+                                      p.variant_id,
+                                      "max_price",
+                                      e.target.value
+                                    )
+                                  }
+                                  placeholder="سقف"
+                                  style={{
+                                    width: 100,
+                                    padding: "4px 8px",
+                                    background: "#070c15",
+                                    border: "1px solid #1c2333",
+                                    borderRadius: 3,
+                                    color: p.max_price ? "#ff4560" : "#2a3447",
+                                    fontSize: 11,
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    opacity: isDisc ? 0.4 : 1,
+                                  }}
+                                />
+                              </td>
+
+                              <td style={tdStyle}>
+                                <select
+                                  value={strat}
+                                  onChange={(e) =>
+                                    handleStrategyChange(
+                                      p.variant_id,
+                                      e.target.value
+                                    )
+                                  }
+                                  style={{
+                                    padding: "4px 8px",
+                                    background: "#070c15",
+                                    border: `1px solid ${strategyColor[strat]}33`,
+                                    borderRadius: 3,
+                                    color: strategyColor[strat],
+                                    fontSize: 10,
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  <option value="aggressive">تهاجمی</option>
+                                  <option value="conservative">محافظه‌کار</option>
+                                  <option value="step_up">سود-محور</option>
+                                </select>
+                              </td>
+
+                              <td style={tdStyle}>
+                                <button
+                                  onClick={() =>
+                                    autoDiscover(
+                                      p.variant_id,
+                                      p.reference_price,
+                                      p.current_price
+                                    )
+                                  }
+                                  disabled={isDisc || !p.current_price}
+                                  style={{
+                                    padding: "4px 10px",
+                                    background: "#a78bfa11",
+                                    border: "1px solid #a78bfa33",
+                                    borderRadius: 3,
+                                    color: "#a78bfa",
+                                    fontSize: 10,
+                                    cursor: "pointer",
+                                    fontFamily: "'IBM Plex Mono', monospace",
+                                    opacity: isDisc || !p.current_price ? 0.3 : 1,
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {isDisc ? "⟳ اسکن..." : "⟐ کشف"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div
+                  style={{
+                    padding: "8px 16px",
+                    borderTop: "1px solid #070c15",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: "#2a3447",
+                      fontFamily: "'IBM Plex Mono', monospace",
+                    }}
+                  >
+                    {filtered.length} / {products.length} تنوع
+                  </span>
+                  {selectedIds.size > 0 && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: "#00cfff",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                      }}
+                    >
+                      {selectedIds.size} انتخاب‌شده
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ═══ SETTINGS ═══════════════════════════════════════════════════════ */}
+          {tab === "settings" && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
+                maxWidth: 700,
+              }}
+            >
+              {/* Strategy section */}
+              <Section title="استراتژی پیش‌فرض ربات">
+                <div
+                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}
+                >
+                  {[
+                    {
+                      k: "aggressive",
+                      l: "تهاجمی",
+                      d: "یک گام زیر رقیب",
+                      c: "#ff4560",
+                    },
+                    {
+                      k: "conservative",
+                      l: "محافظه‌کار",
+                      d: "فقط اگر فاصله زیاد باشد",
+                      c: "#00cfff",
+                    },
+                    {
+                      k: "step_up",
+                      l: "سود-محور",
+                      d: "آرام قیمت را بالا می‌برد",
+                      c: "#ffb700",
+                    },
+                  ].map((s) => (
+                    <button
+                      key={s.k}
+                      onClick={() =>
+                        setSettings((prev) => ({ ...prev, default_strategy: s.k }))
+                      }
+                      style={{
+                        padding: "12px",
+                        background:
+                          settings.default_strategy === s.k
+                            ? `${s.c}11`
+                            : "#070c15",
+                        border: `1px solid ${
+                          settings.default_strategy === s.k ? `${s.c}44` : "#1c2333"
+                        }`,
+                        borderRadius: 4,
+                        color:
+                          settings.default_strategy === s.k ? s.c : "#4a5568",
+                        textAlign: "right",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                        {s.l}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          opacity: 0.7,
+                          fontFamily: "'IBM Plex Mono', monospace",
+                        }}
+                      >
+                        {s.d}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </Section>
+
+              {/* Guard rails */}
+              <Section title="تنظیمات اصلی">
+                <div
+                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}
+                >
+                  {[
+                    { k: "default_step", l: "گام پیش‌فرض قیمت (تومان)", step: 500 },
+                    { k: "variant_cooldown_seconds", l: "cooldown هر تنوع (ثانیه)", step: 60 },
+                    { k: "my_seller_id", l: "شناسه فروشنده (برای رقبا)", step: 1 },
+                    { k: "rate_limit_pause_seconds", l: "مکث بعد از 429 (ثانیه)", step: 30 },
+                    { k: "max_consecutive_failures", l: "حداکثر خطای متوالی", step: 1 },
+                    { k: "max_retries", l: "تعداد تلاش مجدد", step: 1 },
+                    { k: "lead_time", l: "مدت تحویل (روز)", step: 1 },
+                    { k: "max_per_order", l: "حداکثر سفارش", step: 1 },
+                  ].map((f) => (
+                    <SettingInput
+                      key={f.k}
+                      label={f.l}
+                      value={(settings as any)[f.k]}
+                      step={f.step}
+                      onChange={(v) =>
+                        setSettings((prev) => ({ ...prev, [f.k]: v }))
+                      }
+                    />
+                  ))}
+                </div>
+              </Section>
+
+              {/* Timing */}
+              <Section title="تنظیمات شبکه و زمان‌بندی">
+                <div
+                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}
+                >
+                  {[
+                    { k: "request_delay_min", l: "تاخیر کمینه (ثانیه)", step: 0.5 },
+                    { k: "request_delay_max", l: "تاخیر بیشینه (ثانیه)", step: 0.5 },
+                    { k: "rate_limit_backoff_base", l: "پایه backoff", step: 5 },
+                  ].map((f) => (
+                    <SettingInput
+                      key={f.k}
+                      label={f.l}
+                      value={(settings as any)[f.k]}
+                      step={f.step}
+                      onChange={(v) =>
+                        setSettings((prev) => ({ ...prev, [f.k]: v }))
+                      }
+                    />
+                  ))}
+                </div>
+              </Section>
+
+              {/* Misc */}
+              <Section title="تنظیمات متفرقه">
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: "#4a5568",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        marginBottom: 6,
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      نوع ارسال
+                    </div>
+                    <select
+                      value={settings.shipping_type}
+                      onChange={(e) =>
+                        setSettings((prev) => ({ ...prev, shipping_type: e.target.value }))
+                      }
+                      style={selectStyle}
+                    >
+                      <option value="seller">فروشنده</option>
+                      <option value="digikala">دیجی‌کالا</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: "#4a5568",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        marginBottom: 6,
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      Webhook هشدار (اختیاری)
+                    </div>
+                    <input
+                      type="url"
+                      value={settings.notify_webhook_url}
+                      dir="ltr"
+                      onChange={(e) =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          notify_webhook_url: e.target.value,
+                        }))
+                      }
+                      placeholder="https://hooks.slack.com/..."
+                      style={{ ...inputStyle, width: "100%" }}
+                    />
+                  </div>
+
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}
+                  >
+                    <div
+                      onClick={() =>
+                        setSettings((prev) => ({ ...prev, dry_run: !prev.dry_run }))
+                      }
+                      style={{
+                        width: 40,
+                        height: 22,
+                        background: settings.dry_run ? "#ffb70033" : "#1c2333",
+                        border: `1px solid ${settings.dry_run ? "#ffb700" : "#2a3447"}`,
+                        borderRadius: 11,
+                        position: "relative",
+                        cursor: "pointer",
+                        transition: "all 0.2s",
+                      }}
+                    >
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: 2,
+                          left: settings.dry_run ? 20 : 2,
+                          width: 16,
+                          height: 16,
+                          borderRadius: "50%",
+                          background: settings.dry_run ? "#ffb700" : "#2a3447",
+                          transition: "left 0.2s",
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13, color: "#94a3b8" }}>
+                        حالت آزمایشی (Dry Run)
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          color: "#4a5568",
+                          fontFamily: "'IBM Plex Mono', monospace",
+                        }}
+                      >
+                        قیمت به دیجی‌کالا ارسال نمی‌شود
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </Section>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  onClick={saveSettings}
+                  disabled={savingSettings}
+                  style={{
+                    padding: "10px 24px",
+                    background: "#00ff9d11",
+                    border: "1px solid #00ff9d44",
+                    borderRadius: 3,
+                    color: "#00ff9d",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {savingSettings ? "..." : "↑ ذخیره تنظیمات"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ═══ LOGS ════════════════════════════════════════════════════════════ */}
+          {tab === "logs" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "#4a5568",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                >
+                  {logs.length} خط
+                </span>
+                <div style={{ flex: 1 }} />
+                <button
+                  onClick={copyLogs}
+                  style={{
+                    padding: "5px 12px",
+                    background: "transparent",
+                    border: "1px solid #1c2333",
+                    borderRadius: 3,
+                    color: "#4a5568",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                >
+                  ⊕ کپی لاگ
+                </button>
+                <button
+                  onClick={() =>
+                    fetch(`${API}/api/logs`, { method: "DELETE" }).then(() =>
+                      setLogs([])
+                    )
+                  }
+                  style={{
+                    padding: "5px 12px",
+                    background: "#ff456011",
+                    border: "1px solid #ff456033",
+                    borderRadius: 3,
+                    color: "#ff4560",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                >
+                  ⊗ پاک کردن
+                </button>
+              </div>
+
+              <div
+                style={{
+                  background: "#070c15",
+                  border: "1px solid #1c2333",
+                  borderRadius: 4,
+                  overflow: "hidden",
+                }}
+              >
+                {/* Fake terminal header */}
+                <div
+                  style={{
+                    padding: "10px 16px",
+                    borderBottom: "1px solid #1c2333",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: "#0d1117",
+                  }}
+                >
+                  <span
+                    style={{ width: 8, height: 8, borderRadius: "50%", background: "#ff4560" }}
+                  />
+                  <span
+                    style={{ width: 8, height: 8, borderRadius: "50%", background: "#ffb700" }}
+                  />
+                  <span
+                    style={{ width: 8, height: 8, borderRadius: "50%", background: "#00ff9d" }}
+                  />
+                  <span
+                    style={{
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      fontSize: 10,
+                      color: "#2a3447",
+                      marginRight: 12,
+                    }}
+                  >
+                    dk-repricer::log — workspace {workspaceId}
+                  </span>
+                  {isRunning && (
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: "#00ff9d",
+                        animation: "pulse 1.5s infinite",
+                        marginRight: 4,
+                      }}
+                    />
+                  )}
+                </div>
+
+                <div
+                  ref={logsRef}
+                  style={{
+                    height: "calc(100vh - 280px)",
+                    overflowY: "auto",
+                    padding: "16px 20px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                  }}
+                >
+                  {logs.length === 0 ? (
+                    <span
+                      style={{
+                        color: "#1c2333",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        fontSize: 12,
+                      }}
+                    >
+                      $ در انتظار لاگ...
+                    </span>
+                  ) : (
+                    logs.map((log, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          color: logColor(log),
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 11,
+                          lineHeight: 1.8,
+                          borderBottom: log.includes("━━")
+                            ? "1px solid #1c2333"
+                            : "none",
+                          paddingBottom: log.includes("━━") ? 4 : 0,
+                          marginBottom: log.includes("━━") ? 4 : 0,
+                        }}
+                      >
+                        {log}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </main>
+    </div>
+  );
+}
+
+// ─── Small helpers ────────────────────────────────────────────────────────────
+const thStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  textAlign: "center",
+  fontSize: 10,
+  fontFamily: "'IBM Plex Mono', monospace",
+  color: "#2a3447",
+  letterSpacing: "0.08em",
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+};
+
+const tdStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  textAlign: "center",
+  verticalAlign: "middle",
+  borderBottom: "1px solid #0d1117",
+};
+
+const inputStyle: React.CSSProperties = {
+  padding: "6px 10px",
+  background: "#070c15",
+  border: "1px solid #1c2333",
+  borderRadius: 3,
+  color: "#e2e8f0",
+  fontSize: 12,
+  fontFamily: "'IBM Plex Mono', monospace",
+};
+
+const selectStyle: React.CSSProperties = {
+  padding: "6px 10px",
+  background: "#070c15",
+  border: "1px solid #1c2333",
+  borderRadius: 3,
+  color: "#e2e8f0",
+  fontSize: 12,
+  fontFamily: "'IBM Plex Mono', monospace",
+  cursor: "pointer",
+};
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        background: "#0d1117",
+        border: "1px solid #1c2333",
+        borderRadius: 4,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "10px 16px",
+          borderBottom: "1px solid #1c2333",
+          fontSize: 10,
+          fontFamily: "'IBM Plex Mono', monospace",
+          color: "#4a5568",
+          letterSpacing: "0.1em",
+          background: "#070c15",
+        }}
+      >
+        {title.toUpperCase()}
+      </div>
+      <div style={{ padding: 16 }}>{children}</div>
+    </div>
+  );
+}
+
+function SettingInput({
+  label,
+  value,
+  step,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "#4a5568",
+          fontFamily: "'IBM Plex Mono', monospace",
+          marginBottom: 6,
+          letterSpacing: "0.05em",
+        }}
+      >
+        {label}
+      </div>
+      <input
+        type="number"
+        value={value}
+        step={step}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ ...inputStyle, width: "100%" }}
+      />
     </div>
   );
 }
