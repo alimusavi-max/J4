@@ -5,464 +5,394 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const API = "http://localhost:8000";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-const fmt    = (n: any) => n ? Number(n).toLocaleString("fa-IR") : "—";
-const fmtNum = (n: any) => n ? Number(n).toLocaleString()        : "—";
+const fmt = (n: any) => (n != null && n !== "" ? Number(n).toLocaleString("fa-IR") : "—");
+const fmtNum = (n: any) => (n != null && n !== "" ? Number(n).toLocaleString() : "—");
+const fmtPct = (n: number, d: number) =>
+  d > 0 ? Math.round((n / d) * 100) + "%" : "0%";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface Product {
-  variant_id:       number;
-  title:            string;
+  variant_id: number;
+  title: string;
   is_buy_box_winner: boolean;
-  current_price:    number;
-  reference_price:  number;
-  buy_box_price?:   number;
-  stock:            number;
-  min_price:        string | number;
-  max_price:        string | number;
-  has_config:       boolean;
+  current_price: number;
+  reference_price: number;
+  buy_box_price?: number;
+  stock: number;
+  seller_stock?: number;
+  min_price: string | number;
+  max_price: string | number;
+  has_config: boolean;
+  is_active?: boolean; // ← برای روشن/خاموش تنوع
 }
 
 interface BotState {
-  is_running?:      boolean;
-  workspace_id?:    number;
-  step_price?:      number;
-  started_at?:      string;
-  cycle_count?:     number;
-  total_updates?:   number;
-  buybox_wins?:     number;
+  is_running?: boolean;
+  workspace_id?: number;
+  step_price?: number;
+  started_at?: string;
+  cycle_count?: number;
+  total_updates?: number;
+  buybox_wins?: number;
   rate_limit_hits?: number;
 }
 
 interface Settings {
-  lead_time:               number;
-  shipping_type:           string;
-  max_per_order:           number;
-  request_delay_min:       number;
-  request_delay_max:       number;
+  lead_time: number;
+  shipping_type: string;
+  max_per_order: number;
+  request_delay_min: number;
+  request_delay_max: number;
   rate_limit_backoff_base: number;
-  max_retries:             number;
-  buybox_formula:          string;
-  min_price_formula:       string;
-  auto_apply_min_price:    boolean;
-  strategy_mode:           string;
+  max_retries: number;
+  buybox_formula: string;
+  min_price_formula: string;
+  auto_apply_min_price: boolean;
+  strategy_mode: string;
+  dry_run: boolean;
+  variant_cooldown_seconds: number;
+  max_price_change_percent: number;
+  notify_webhook_url: string;
+  rate_limit_pause_seconds: number;
+  max_consecutive_failures: number;
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  lead_time:               2,
-  shipping_type:           "seller",
-  max_per_order:           4,
-  request_delay_min:       3.0,
-  request_delay_max:       6.0,
+  lead_time: 2,
+  shipping_type: "seller",
+  max_per_order: 4,
+  request_delay_min: 3.0,
+  request_delay_max: 6.0,
   rate_limit_backoff_base: 15,
-  max_retries:             3,
-  buybox_formula:          "competitor_price - step_price",
-  min_price_formula:       "",
-  auto_apply_min_price:    false,
-  strategy_mode:           "aggressive",
+  max_retries: 3,
+  buybox_formula: "competitor_price - step_price",
+  min_price_formula: "",
+  auto_apply_min_price: false,
+  strategy_mode: "aggressive",
+  dry_run: false,
+  variant_cooldown_seconds: 300,
+  max_price_change_percent: 8.0,
+  notify_webhook_url: "",
+  rate_limit_pause_seconds: 180,
+  max_consecutive_failures: 10,
 };
 
-// ─── StatCard ────────────────────────────────────────────────────────────────
-function StatCard({
-  label, value, sub, color = "cyan", pulse = false,
-}: {
-  label: string; value: any; sub?: string; color?: string; pulse?: boolean;
-}) {
-  const colors: Record<string, string> = {
-    cyan:   "from-cyan-500/20   to-cyan-600/5   border-cyan-500/30   text-cyan-300",
-    green:  "from-green-500/20  to-green-600/5  border-green-500/30  text-green-300",
-    amber:  "from-amber-500/20  to-amber-600/5  border-amber-500/30  text-amber-300",
-    red:    "from-red-500/20    to-red-600/5    border-red-500/30    text-red-300",
-    violet: "from-violet-500/20 to-violet-600/5 border-violet-500/30 text-violet-300",
-    rose:   "from-rose-500/20   to-rose-600/5   border-rose-500/30   text-rose-300",
-  };
+type ActiveTab = "dashboard" | "products" | "settings" | "logs";
+type FilterMode = "all" | "winning" | "losing" | "configured" | "unconfigured";
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
+const Icon = {
+  Dashboard: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  ),
+  Products: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    </svg>
+  ),
+  Settings: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+    </svg>
+  ),
+  Logs: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" />
+      <line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" />
+    </svg>
+  ),
+  Play: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <polygon points="5,3 19,12 5,21" />
+    </svg>
+  ),
+  Stop: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+    </svg>
+  ),
+  Refresh: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <polyline points="23,4 23,10 17,10" /><polyline points="1,20 1,14 7,14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+    </svg>
+  ),
+  Save: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17,21 17,13 7,13" /><polyline points="7,3 7,8 15,8" />
+    </svg>
+  ),
+  Search: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  ),
+  ChevronDown: () => (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <polyline points="6,9 12,15 18,9" />
+    </svg>
+  ),
+  Trash: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="3,6 5,6 21,6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4h6v2" />
+    </svg>
+  ),
+  Zap: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polygon points="13,2 3,14 12,14 11,22 21,10 12,10" />
+    </svg>
+  ),
+  Trophy: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M6 9H4a2 2 0 0 1-2-2V5h4M18 9h2a2 2 0 0 0 2-2V5h-4" />
+      <path d="M8 21h8M12 17v4" />
+      <path d="M6 9a6 6 0 0 0 12 0V3H6v6z" />
+    </svg>
+  ),
+  Toggle: ({ on }: { on: boolean }) => (
+    <svg width="36" height="20" viewBox="0 0 36 20">
+      <rect width="36" height="20" rx="10" fill={on ? "#22c55e" : "#374151"} />
+      <circle cx={on ? "26" : "10"} cy="10" r="8" fill="white" style={{ transition: "cx 0.2s" }} />
+    </svg>
+  ),
+  Warning: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  ),
+  Copy: () => (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  ),
+};
+
+// ─── Toast ────────────────────────────────────────────────────────────────────
+interface Toast { id: number; msg: string; type: "success" | "error" | "info" }
+let toastId = 0;
+
+function ToastContainer({ toasts, remove }: { toasts: Toast[]; remove: (id: number) => void }) {
   return (
-    <div className={`relative bg-gradient-to-br ${colors[color] || colors.cyan} border rounded-xl p-4 overflow-hidden`}>
-      {pulse && (
-        <span className="absolute top-3 right-3 flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
-        </span>
-      )}
-      <div className="text-2xl font-bold font-mono tracking-tight">{value}</div>
-      <div className="text-xs text-slate-400 mt-1">{label}</div>
-      {sub && <div className="text-[10px] text-slate-500 mt-0.5">{sub}</div>}
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none" style={{ minWidth: 320 }}>
+      {toasts.map(t => (
+        <div
+          key={t.id}
+          onClick={() => remove(t.id)}
+          className="pointer-events-auto cursor-pointer px-5 py-3 rounded-xl text-sm font-medium shadow-2xl border backdrop-blur-sm"
+          style={{
+            background: t.type === "success" ? "rgba(20,83,45,0.97)" : t.type === "error" ? "rgba(127,29,29,0.97)" : "rgba(15,23,42,0.97)",
+            borderColor: t.type === "success" ? "#16a34a55" : t.type === "error" ? "#dc262655" : "#1e40af55",
+            color: t.type === "success" ? "#86efac" : t.type === "error" ? "#fca5a5" : "#93c5fd",
+            animation: "toastIn 0.25s ease",
+          }}
+        >
+          {t.type === "success" ? "✓ " : t.type === "error" ? "✗ " : "ℹ "}{t.msg}
+        </div>
+      ))}
     </div>
   );
 }
 
-// ─── FormulaInput ────────────────────────────────────────────────────────────
-function FormulaInput({
-  value, onChange, placeholder, variables,
-  onTest, testResult, presets, label, hint,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  variables: string[];
-  onTest: () => void;
+// ─── Stat Card ────────────────────────────────────────────────────────────────
+function StatCard({ label, value, sub, accent, pulse }: {
+  label: string; value: any; sub?: string; accent: string; pulse?: boolean;
+}) {
+  return (
+    <div className="relative rounded-2xl p-5 overflow-hidden border"
+      style={{ background: "rgba(15,23,42,0.8)", borderColor: accent + "33" }}>
+      <div className="absolute inset-0 opacity-10" style={{ background: `radial-gradient(circle at top right, ${accent}, transparent 70%)` }} />
+      {pulse && (
+        <span className="absolute top-3 right-3 flex h-2 w-2">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: accent }} />
+          <span className="relative inline-flex rounded-full h-2 w-2" style={{ background: accent }} />
+        </span>
+      )}
+      <div className="relative">
+        <div className="text-2xl font-bold font-mono tracking-tight" style={{ color: accent }}>{value}</div>
+        <div className="text-xs mt-1.5" style={{ color: "#94a3b8" }}>{label}</div>
+        {sub && <div className="text-[10px] mt-0.5" style={{ color: "#475569" }}>{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Badge ────────────────────────────────────────────────────────────────────
+function Badge({ win }: { win: boolean }) {
+  return win ? (
+    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
+      style={{ background: "rgba(34,197,94,0.12)", color: "#4ade80", border: "1px solid #22c55e33" }}>
+      <Icon.Trophy /> بای‌باکس
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
+      style={{ background: "rgba(239,68,68,0.12)", color: "#f87171", border: "1px solid #ef444433" }}>
+      <Icon.Warning /> رقابت
+    </span>
+  );
+}
+
+// ─── Formula Input ────────────────────────────────────────────────────────────
+function FormulaInput({ label, hint, value, onChange, variables, onTest, testResult, presets }: {
+  label: string; hint: string; value: string; onChange: (v: string) => void;
+  variables: string[]; onTest: () => void;
   testResult: { success?: boolean; result?: number; error?: string } | null;
   presets: { label: string; formula: string }[];
-  label: string;
-  hint: string;
 }) {
   return (
     <div className="space-y-2">
-      <label className="text-xs font-semibold text-slate-300">{label}</label>
-      <p className="text-[10px] text-slate-500">{hint}</p>
-
-      {/* Preset picker */}
+      <label className="text-xs font-semibold" style={{ color: "#94a3b8" }}>{label}</label>
+      <p className="text-[10px]" style={{ color: "#475569" }}>{hint}</p>
       <div className="flex flex-wrap gap-1.5">
-        {presets.map((p) => (
-          <button
-            key={p.formula}
-            onClick={() => onChange(p.formula)}
-            className={`text-[10px] px-2 py-1 rounded-md border transition-colors ${
-              value === p.formula
-                ? "bg-cyan-700/50 border-cyan-500/60 text-cyan-200"
-                : "bg-slate-800 border-slate-600 text-slate-400 hover:text-slate-200"
-            }`}
-          >
+        {presets.map(p => (
+          <button key={p.formula} onClick={() => onChange(p.formula)}
+            className="text-[10px] px-2 py-1 rounded-lg border transition-all"
+            style={{
+              background: value === p.formula ? "rgba(99,102,241,0.2)" : "rgba(15,23,42,0.8)",
+              borderColor: value === p.formula ? "#6366f1" : "#1e293b",
+              color: value === p.formula ? "#a5b4fc" : "#64748b",
+            }}>
             {p.label}
           </button>
         ))}
       </div>
-
-      {/* Formula textarea */}
       <div className="flex gap-2">
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          dir="ltr"
-          className="flex-1 bg-slate-900 border border-slate-600 focus:border-cyan-500 text-slate-200 rounded-lg px-3 py-2 text-sm font-mono outline-none transition-colors placeholder-slate-600"
-        />
-        <button
-          onClick={onTest}
-          className="bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-300 text-xs px-3 py-2 rounded-lg whitespace-nowrap transition-colors"
-        >
-          🧪 تست
+        <input type="text" value={value} onChange={e => onChange(e.target.value)}
+          dir="ltr" className="flex-1 rounded-xl px-3 py-2 text-sm font-mono outline-none transition-all"
+          style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#e2e8f0" }} />
+        <button onClick={onTest}
+          className="px-3 py-2 rounded-xl text-xs font-semibold border transition-all hover:opacity-80"
+          style={{ background: "rgba(99,102,241,0.15)", border: "1px solid #6366f133", color: "#a5b4fc" }}>
+          تست
         </button>
       </div>
-
-      {/* Variables */}
       <div className="flex flex-wrap gap-1">
-        {variables.map((v) => (
-          <code
-            key={v}
-            onClick={() => onChange((value ? value + " " : "") + v)}
-            className="text-[10px] bg-slate-800/80 border border-slate-700 text-cyan-400 px-1.5 py-0.5 rounded cursor-pointer hover:bg-slate-700 transition-colors"
-          >
+        {variables.map(v => (
+          <code key={v} onClick={() => onChange((value ? value + " " : "") + v)}
+            className="text-[10px] px-2 py-0.5 rounded cursor-pointer transition-all hover:opacity-80"
+            style={{ background: "#0f172a", border: "1px solid #1e293b", color: "#38bdf8" }}>
             {v}
           </code>
         ))}
       </div>
-
-      {/* Test result */}
       {testResult && (
-        <div
-          className={`text-xs px-3 py-2 rounded-lg border ${
-            testResult.success
-              ? "bg-emerald-900/30 border-emerald-700/40 text-emerald-300"
-              : "bg-red-900/30 border-red-700/40 text-red-300"
-          }`}
-        >
-          {testResult.success
-            ? `✅ نتیجه: ${fmtNum(testResult.result)} تومان`
-            : `❌ ${testResult.error}`}
+        <div className="text-xs px-3 py-2 rounded-xl border"
+          style={{
+            background: testResult.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+            borderColor: testResult.success ? "#22c55e33" : "#ef444433",
+            color: testResult.success ? "#4ade80" : "#f87171",
+          }}>
+          {testResult.success ? `✓ نتیجه: ${fmtNum(testResult.result)} تومان` : `✗ ${testResult.error}`}
         </div>
       )}
     </div>
   );
 }
 
-// ─── SettingsPanel ────────────────────────────────────────────────────────────
-function SettingsPanel({
-  settings, onChange, onSave, saving,
-  onApplyMinFormula, applyingFormula, workspaceId, stepPrice,
-}: {
-  settings: Settings;
-  onChange: (s: Settings) => void;
-  onSave:   () => void;
-  saving:   boolean;
-  onApplyMinFormula: () => void;
-  applyingFormula:   boolean;
-  workspaceId: number;
-  stepPrice:   number;
-}) {
-  const [buyboxTestResult,   setBuyboxTestResult]   = useState<any>(null);
-  const [minPriceTestResult, setMinPriceTestResult] = useState<any>(null);
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Main Component ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
 
-  const FORMULA_VARS_BUYBOX    = ["competitor_price", "reference_price", "current_price", "step_price", "min_price", "buy_box_price"];
-  const FORMULA_VARS_MIN_PRICE = ["reference_price", "current_price", "step_price", "cost"];
-
-  const BUYBOX_PRESETS = [
-    { label: "یک گام زیر رقیب",      formula: "competitor_price - step_price" },
-    { label: "یک درصد زیر رقیب",     formula: "competitor_price * 0.99" },
-    { label: "دو گام زیر رقیب",      formula: "competitor_price - step_price * 2" },
-    { label: "زیر رقیب ≥ کف",        formula: "max(competitor_price - step_price, min_price)" },
-  ];
-  const MIN_PRICE_PRESETS = [
-    { label: "۷۵٪ مرجع",  formula: "reference_price * 0.75" },
-    { label: "۸۰٪ مرجع",  formula: "reference_price * 0.80" },
-    { label: "۷۰٪ مرجع",  formula: "reference_price * 0.70" },
-    { label: "هزینه+۲۰٪", formula: "cost * 1.20" },
-  ];
-
-  const testFormula = async (type: "buybox" | "min_price", formula: string) => {
-    const sampleValues =
-      type === "buybox"
-        ? { competitor_price: 100000, reference_price: 150000, current_price: 98000, step_price: stepPrice, min_price: 70000, buy_box_price: 95000 }
-        : { reference_price: 150000, current_price: 98000, step_price: stepPrice, cost: 60000 };
-
-    try {
-      const res = await fetch(`${API}/api/formula/test`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ formula, formula_type: type, sample_values: sampleValues }),
-      });
-      const data = await res.json();
-      if (type === "buybox")    setBuyboxTestResult(data);
-      else                      setMinPriceTestResult(data);
-    } catch {
-      const err = { success: false, error: "خطا در ارتباط با سرور" };
-      if (type === "buybox") setBuyboxTestResult(err);
-      else                   setMinPriceTestResult(err);
-    }
-  };
-
-  const set = (key: keyof Settings) => (val: any) => onChange({ ...settings, [key]: val });
-
-  const STRATEGIES = [
-    {
-      key: "aggressive",
-      label: "تهاجمی",
-      desc: "همیشه یک گام زیر ارزان‌ترین رقیب — حداکثر شانس BuyBox",
-    },
-    {
-      key: "conservative",
-      label: "محافظه‌کار",
-      desc: "فقط اگر فاصله قیمتی بزرگ باشد وارد رقابت می‌شود",
-    },
-    {
-      key: "formula",
-      label: "فرمول‌محور",
-      desc: "قیمت هدف دقیقاً از فرمول سفارشی محاسبه می‌شود",
-    },
-  ];
-
-  return (
-    <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl p-5 space-y-6 backdrop-blur-sm">
-      {/* ── Header ── */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-bold text-slate-200">⚙️ تنظیمات پیشرفته ربات</h2>
-      </div>
-
-      {/* ── Strategy Mode ── */}
-      <div className="space-y-2">
-        <label className="text-xs font-semibold text-slate-300">استراتژی رقابت</label>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-          {STRATEGIES.map((s) => (
-            <button
-              key={s.key}
-              onClick={() => set("strategy_mode")(s.key)}
-              className={`text-right p-3 rounded-xl border transition-all ${
-                settings.strategy_mode === s.key
-                  ? "bg-cyan-700/30 border-cyan-500/60 text-cyan-200"
-                  : "bg-slate-900/50 border-slate-700 text-slate-400 hover:border-slate-500"
-              }`}
-            >
-              <div className="font-semibold text-sm">{s.label}</div>
-              <div className="text-[10px] mt-1 opacity-70 leading-4">{s.desc}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── BuyBox Formula ── */}
-      <div className={`transition-opacity ${settings.strategy_mode !== "formula" ? "opacity-50 pointer-events-none" : ""}`}>
-        <FormulaInput
-          label="🎯 فرمول قیمت‌گذاری بای‌باکس"
-          hint="فرمولی برای محاسبه قیمت رقابتی وقتی بای‌باکس نداریم."
-          value={settings.buybox_formula}
-          onChange={set("buybox_formula")}
-          placeholder="مثال: competitor_price - step_price"
-          variables={FORMULA_VARS_BUYBOX}
-          presets={BUYBOX_PRESETS}
-          onTest={() => testFormula("buybox", settings.buybox_formula)}
-          testResult={buyboxTestResult}
-        />
-        {settings.strategy_mode !== "formula" && (
-          <p className="text-[10px] text-slate-500 mt-1">⚠️ فرمول فقط در حالت «فرمول‌محور» فعال است</p>
-        )}
-      </div>
-
-      {/* ── Min Price Formula ── */}
-      <div className="space-y-3 border-t border-slate-700/40 pt-4">
-        <FormulaInput
-          label="📉 فرمول محاسبه خودکار کف قیمت"
-          hint="با این فرمول می‌توانید کف قیمت همه محصولات را به صورت دسته‌ای محاسبه و اعمال کنید."
-          value={settings.min_price_formula}
-          onChange={set("min_price_formula")}
-          placeholder="مثال: reference_price * 0.75"
-          variables={FORMULA_VARS_MIN_PRICE}
-          presets={MIN_PRICE_PRESETS}
-          onTest={() => testFormula("min_price", settings.min_price_formula)}
-          testResult={minPriceTestResult}
-        />
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onApplyMinFormula}
-            disabled={applyingFormula || !settings.min_price_formula}
-            className="bg-indigo-700/70 hover:bg-indigo-600/70 border border-indigo-600/50 text-indigo-200 text-xs font-semibold px-4 py-2 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {applyingFormula ? "⏳ در حال اعمال..." : "📐 اعمال به همه محصولات"}
-          </button>
-          <p className="text-[10px] text-slate-500">
-            کف قیمت محاسبه‌شده در config ذخیره می‌شود — قیمت دیجی‌کالا فوراً تغییر نمی‌کند
-          </p>
-        </div>
-      </div>
-
-      {/* ── API Settings ── */}
-      <div className="border-t border-slate-700/40 pt-4 space-y-3">
-        <label className="text-xs font-semibold text-slate-300">🔧 تنظیمات API و تحویل</label>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[
-            { key: "lead_time",     label: "مدت تحویل (روز)",     step: 1,   min: 1 },
-            { key: "max_per_order", label: "حداکثر سفارش",        step: 1,   min: 1 },
-          ].map(({ key, label, step, min }) => (
-            <div key={key} className="flex flex-col gap-1">
-              <label className="text-[10px] text-slate-500">{label}</label>
-              <input
-                type="number"
-                value={(settings as any)[key]}
-                step={step}
-                min={min}
-                onChange={(e) => set(key as keyof Settings)(Number(e.target.value))}
-                className="bg-slate-900 border border-slate-600 focus:border-cyan-500 text-slate-200 rounded-lg px-3 py-2 text-sm text-center outline-none"
-              />
-            </div>
-          ))}
-          <div className="flex flex-col gap-1">
-            <label className="text-[10px] text-slate-500">نوع ارسال</label>
-            <select
-              value={settings.shipping_type}
-              onChange={(e) => set("shipping_type")(e.target.value)}
-              className="bg-slate-900 border border-slate-600 focus:border-cyan-500 text-slate-200 rounded-lg px-3 py-2 text-sm outline-none"
-            >
-              <option value="seller">فروشنده</option>
-              <option value="digikala">دیجی‌کالا</option>
-            </select>
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-[10px] text-slate-500">تلاش مجدد</label>
-            <input
-              type="number" min={1} max={5}
-              value={settings.max_retries}
-              onChange={(e) => set("max_retries")(Number(e.target.value))}
-              className="bg-slate-900 border border-slate-600 focus:border-cyan-500 text-slate-200 rounded-lg px-3 py-2 text-sm text-center outline-none"
-            />
-          </div>
-        </div>
-
-        <label className="text-xs font-semibold text-slate-300 block mt-2">⏱ مدیریت تاخیر و نرخ (ثانیه)</label>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          {[
-            { key: "request_delay_min",       label: "تاخیر کمینه",       step: 0.5 },
-            { key: "request_delay_max",       label: "تاخیر بیشینه",      step: 0.5 },
-            { key: "rate_limit_backoff_base", label: "صبر پس از 429",     step: 5   },
-          ].map(({ key, label, step }) => (
-            <div key={key} className="flex flex-col gap-1">
-              <label className="text-[10px] text-slate-500">{label}</label>
-              <input
-                type="number"
-                value={(settings as any)[key]}
-                step={step}
-                min={0}
-                onChange={(e) => set(key as keyof Settings)(Number(e.target.value))}
-                className="bg-slate-900 border border-slate-600 focus:border-cyan-500 text-slate-200 rounded-lg px-3 py-2 text-sm text-center outline-none"
-              />
-            </div>
-          ))}
-        </div>
-        <p className="text-[10px] text-slate-500">
-          تاخیر تصادفی بین درخواست‌ها (min–max) برای شبیه‌سازی رفتار انسانی — در صورت 429 به صورت نمایی افزایش می‌یابد
-        </p>
-      </div>
-
-      {/* ── Save ── */}
-      <div className="flex justify-end pt-2">
-        <button
-          onClick={onSave}
-          disabled={saving}
-          className="bg-emerald-700/80 hover:bg-emerald-600 border border-emerald-600/50 text-white text-sm font-bold px-6 py-2.5 rounded-lg transition-all disabled:opacity-50"
-        >
-          {saving ? "⏳ ذخیره..." : "💾 ذخیره تنظیمات"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-export default function Dashboard() {
-  const [products,       setProducts]       = useState<Product[]>([]);
-  const [logs,           setLogs]           = useState<string[]>([]);
-  const [botState,       setBotState]       = useState<BotState>({});
-  const [isRunning,      setIsRunning]      = useState(false);
-  const [loading,        setLoading]        = useState(false);
-  const [saving,         setSaving]         = useState(false);
+export default function RepricerApp() {
+  // ─── State ─────────────────────────────────────────────────────────────────
+  const [tab, setTab] = useState<ActiveTab>("dashboard");
+  const [products, setProducts] = useState<Product[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [botState, setBotState] = useState<BotState>({});
+  const [isRunning, setIsRunning] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [stepPrice,      setStepPrice]      = useState(1000);
-  const [cycleDelay,     setCycleDelay]     = useState(120);
-  const [workspaceId,    setWorkspaceId]    = useState(1);
-  const [filter,         setFilter]         = useState("all");
-  const [discoveringId,  setDiscoveringId]  = useState<string | null>(null);
-  const [showSettings,   setShowSettings]   = useState(false);
-  const [settings,       setSettings]       = useState<Settings>(DEFAULT_SETTINGS);
+  const [stepPrice, setStepPrice] = useState(1000);
+  const [cycleDelay, setCycleDelay] = useState(120);
+  const [workspaceId, setWorkspaceId] = useState(1);
+  const [filter, setFilter] = useState<FilterMode>("all");
+  const [search, setSearch] = useState("");
+  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [applyingFormula, setApplyingFormula] = useState(false);
-  const [stats,          setStats]          = useState({ total: 0, configured: 0 });
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [buyboxTestResult, setBuyboxTestResult] = useState<any>(null);
+  const [minPriceTestResult, setMinPriceTestResult] = useState<any>(null);
+  const [bulkMin, setBulkMin] = useState("");
+  const [bulkMax, setBulkMax] = useState("");
+  const [sortBy, setSortBy] = useState<"price" | "title" | "stock" | "none">("none");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const logsRef = useRef<HTMLDivElement>(null);
 
-  // ─── Load Settings ────────────────────────────────────────────────
+  // ─── Toast ─────────────────────────────────────────────────────────────────
+  const toast = useCallback((msg: string, type: Toast["type"] = "info") => {
+    const id = ++toastId;
+    setToasts(t => [...t, { id, msg, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500);
+  }, []);
+  const removeToast = useCallback((id: number) => setToasts(t => t.filter(x => x.id !== id)), []);
+
+  // ─── Load Settings ─────────────────────────────────────────────────────────
   useEffect(() => {
-    fetch(`${API}/api/settings`)
-      .then((r) => r.json())
-      .then((d) => { if (d.settings) setSettings(d.settings); })
-      .catch(() => {});
+    fetch(`${API}/api/settings`).then(r => r.json()).then(d => {
+      if (d.settings) setSettings(d.settings);
+    }).catch(() => { });
   }, []);
 
-  // ─── Polling ─────────────────────────────────────────────────────
+  // ─── Polling ───────────────────────────────────────────────────────────────
   useEffect(() => {
     const poll = setInterval(() => {
-      fetch(`${API}/api/logs?limit=150`)
-        .then((r) => r.json())
-        .then((d) => {
-          setLogs(d.logs || []);
-          setIsRunning(d.is_running);
-          setBotState(d.bot_state || {});
-        })
-        .catch(() => {});
+      fetch(`${API}/api/logs?limit=200`).then(r => r.json()).then(d => {
+        setLogs(d.logs || []);
+        setIsRunning(!!d.is_running);
+        setBotState(d.bot_state || {});
+      }).catch(() => { });
     }, 2000);
     return () => clearInterval(poll);
   }, []);
 
-  // Auto-scroll logs
   useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = 0;
   }, [logs]);
 
-  // ─── Actions ──────────────────────────────────────────────────────
+  // ─── Derived ───────────────────────────────────────────────────────────────
+  const buyboxWinners = products.filter(p => p.is_buy_box_winner).length;
+  const configured = products.filter(p => p.has_config || (p.min_price !== "" && p.max_price !== "")).length;
+  const totalStock = products.reduce((a, p) => a + (p.seller_stock || p.stock || 0), 0);
+  const uptime = botState.started_at
+    ? Math.floor((Date.now() - new Date(botState.started_at).getTime()) / 60000) : 0;
+
+  const filtered = products
+    .filter(p => {
+      if (filter === "winning") return p.is_buy_box_winner;
+      if (filter === "losing") return !p.is_buy_box_winner;
+      if (filter === "configured") return p.has_config || (p.min_price !== "" && p.max_price !== "");
+      if (filter === "unconfigured") return !p.has_config && (p.min_price === "" || p.max_price === "");
+      return true;
+    })
+    .filter(p => !search || p.title?.toLowerCase().includes(search.toLowerCase()) || String(p.variant_id).includes(search))
+    .sort((a, b) => {
+      if (sortBy === "none") return 0;
+      const dir = sortDir === "asc" ? 1 : -1;
+      if (sortBy === "price") return (a.current_price - b.current_price) * dir;
+      if (sortBy === "stock") return ((a.seller_stock || a.stock) - (b.seller_stock || b.stock)) * dir;
+      if (sortBy === "title") return a.title?.localeCompare(b.title || "") * dir;
+      return 0;
+    });
+
+  // ─── Actions ───────────────────────────────────────────────────────────────
   const loadProducts = async () => {
     setLoading(true);
     try {
-      const res  = await fetch(`${API}/api/products?workspace_id=${workspaceId}`);
+      const res = await fetch(`${API}/api/products?workspace_id=${workspaceId}`);
       const data = await res.json();
       setProducts(data.variants || []);
-      setStats({ total: data.total || 0, configured: data.configured || 0 });
+      toast(`${data.total || 0} محصول دریافت شد`, "success");
     } catch {
-      alert("خطا در ارتباط با سرور");
+      toast("خطا در ارتباط با سرور", "error");
     }
     setLoading(false);
   };
@@ -470,7 +400,7 @@ export default function Dashboard() {
   const saveConfigs = async () => {
     setSaving(true);
     const configs: Record<string, any> = {};
-    products.forEach((p) => {
+    products.forEach(p => {
       if (p.min_price !== "" && p.max_price !== "") {
         configs[String(p.variant_id)] = {
           min_price: parseInt(String(p.min_price)),
@@ -479,15 +409,15 @@ export default function Dashboard() {
       }
     });
     try {
-      const res  = await fetch(`${API}/api/config`, {
-        method:  "POST",
+      const res = await fetch(`${API}/api/config`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ configs }),
+        body: JSON.stringify({ configs }),
       });
       const d = await res.json();
-      alert(`✅ ${d.saved_count} محصول ذخیره شد.`);
+      toast(`${d.saved_count} محصول ذخیره شد`, "success");
     } catch {
-      alert("خطا در ذخیره‌سازی");
+      toast("خطا در ذخیره‌سازی", "error");
     }
     setSaving(false);
   };
@@ -495,432 +425,734 @@ export default function Dashboard() {
   const saveSettings = async () => {
     setSavingSettings(true);
     try {
-      const res  = await fetch(`${API}/api/settings`, {
-        method:  "POST",
+      const res = await fetch(`${API}/api/settings`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(settings),
+        body: JSON.stringify(settings),
       });
       const data = await res.json();
-      if (data.status === "success") alert("✅ تنظیمات ذخیره شد.");
-      else                           alert("❌ خطا: " + JSON.stringify(data));
+      if (data.status === "success") toast("تنظیمات ذخیره شد", "success");
+      else toast("خطا در ذخیره", "error");
     } catch {
-      alert("خطا در ارتباط با سرور");
+      toast("خطا در ارتباط با سرور", "error");
     }
     setSavingSettings(false);
-  };
-
-  const applyMinFormula = async () => {
-    if (!settings.min_price_formula) {
-      alert("ابتدا یک فرمول کف قیمت وارد کنید.");
-      return;
-    }
-    if (!confirm(`فرمول «${settings.min_price_formula}» به همه محصولات اعمال شود؟`)) return;
-
-    setApplyingFormula(true);
-    try {
-      const res  = await fetch(`${API}/api/bot/apply_min_formula`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          workspace_id: workspaceId,
-          formula:      settings.min_price_formula,
-          step_price:   stepPrice,
-        }),
-      });
-      const data = await res.json();
-      if (data.status === "success") {
-        alert(`✅ ${data.updated_count} محصول آپدیت شد. فراموش نکنید ذخیره کنید!`);
-        await loadProducts();
-      } else {
-        alert("❌ " + (data.message || JSON.stringify(data)));
-      }
-    } catch {
-      alert("خطای ارتباط با سرور");
-    }
-    setApplyingFormula(false);
-  };
-
-  const handlePriceChange = (id: number, field: "min_price" | "max_price", value: string) => {
-    setProducts((prev) => prev.map((p) => p.variant_id === id ? { ...p, [field]: value } : p));
   };
 
   const toggleBot = async () => {
     if (isRunning) {
       await fetch(`${API}/api/bot/stop`, { method: "POST" });
+      toast("ربات متوقف شد", "info");
     } else {
       await fetch(`${API}/api/bot/start`, {
-        method:  "POST",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          workspace_id: workspaceId,
-          step_price:   parseInt(String(stepPrice)),
-          cycle_delay:  parseInt(String(cycleDelay)),
-        }),
+        body: JSON.stringify({ workspace_id: workspaceId, step_price: stepPrice, cycle_delay: cycleDelay }),
       });
+      toast("ربات شروع به کار کرد", "success");
     }
   };
 
   const autoDiscover = async (variant_id: number, reference_price: number, current_price: number) => {
-    if (!confirm(`کشف خودکار بازه برای تنوع ${variant_id}؟\nحدود ۶۰-۹۰ ثانیه طول می‌کشد.`)) return;
+    if (!confirm(`کشف خودکار بازه برای تنوع ${variant_id}؟ حدود ۶۰-۹۰ ثانیه طول می‌کشد.`)) return;
     setDiscoveringId(String(variant_id));
     try {
-      const res  = await fetch(`${API}/api/bot/discover_bounds`, {
-        method:  "POST",
+      const res = await fetch(`${API}/api/bot/discover_bounds`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          workspace_id:    workspaceId,
-          variant_id:      String(variant_id),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          variant_id: String(variant_id),
           reference_price: parseInt(String(reference_price)) || parseInt(String(current_price)),
-          current_price:   parseInt(String(current_price)),
+          current_price: parseInt(String(current_price)),
         }),
       });
       const data = await res.json();
       if (data.success) {
-        setProducts((prev) =>
-          prev.map((p) =>
-            String(p.variant_id) === String(variant_id)
-              ? { ...p, min_price: data.min_price, max_price: data.max_price, has_config: true }
-              : p
-          )
-        );
-        alert(`✅ کف: ${fmtNum(data.min_price)} | سقف: ${fmtNum(data.max_price)}\nفراموش نکنید ذخیره کنید!`);
+        setProducts(prev => prev.map(p =>
+          String(p.variant_id) === String(variant_id)
+            ? { ...p, min_price: data.min_price, max_price: data.max_price, has_config: true }
+            : p
+        ));
+        toast(`کف: ${fmtNum(data.min_price)} | سقف: ${fmtNum(data.max_price)}`, "success");
       } else {
-        alert("❌ خطا: " + data.message);
+        toast("خطا: " + data.message, "error");
       }
     } catch {
-      alert("خطای ارتباط با سرور");
+      toast("خطای ارتباط با سرور", "error");
     }
     setDiscoveringId(null);
   };
 
-  // ─── Derived ─────────────────────────────────────────────────────
-  const buyboxWinners = products.filter((p) => p.is_buy_box_winner).length;
-  const losing        = products.filter((p) => !p.is_buy_box_winner).length;
+  // ── Toggle variant active/inactive (API placeholder) ──────────────────────
+  // NOTE: این تابع placeholder است. وقتی API آماده شد، این قسمت رو با endpoint واقعی جایگزین کن:
+  // POST /api/variants/toggle  →  { variant_id, is_active }
+  const toggleVariantActive = async (variant_id: number, current_active: boolean) => {
+    setTogglingId(String(variant_id));
+    try {
+      // ─── PLACEHOLDER: اینجا باید API call واقعی باشه ───────────────────
+      // const res = await fetch(`${API}/api/variants/toggle`, {
+      //   method: "POST",
+      //   headers: { "Content-Type": "application/json" },
+      //   body: JSON.stringify({ variant_id, is_active: !current_active, workspace_id: workspaceId }),
+      // });
+      // const data = await res.json();
+      // if (!data.success) throw new Error(data.message);
+      // ─── PLACEHOLDER END ──────────────────────────────────────────────────
 
-  const filtered = products.filter((p) => {
-    if (filter === "winning")    return p.is_buy_box_winner;
-    if (filter === "losing")     return !p.is_buy_box_winner;
-    if (filter === "configured") return p.has_config || (p.min_price !== "" && p.max_price !== "");
-    return true;
-  });
-
-  const uptime = botState.started_at
-    ? Math.floor((Date.now() - new Date(botState.started_at).getTime()) / 60000)
-    : 0;
-
-  const strategyLabel: Record<string, string> = {
-    aggressive:   "تهاجمی",
-    conservative: "محافظه‌کار",
-    formula:      "فرمول‌محور",
+      // فعلا فقط state رو تغییر میدیم
+      await new Promise(r => setTimeout(r, 400)); // شبیه‌سازی تاخیر شبکه
+      setProducts(prev => prev.map(p =>
+        p.variant_id === variant_id ? { ...p, is_active: !current_active } : p
+      ));
+      toast(`تنوع ${variant_id} ${!current_active ? "فعال" : "غیرفعال"} شد`, "success");
+    } catch (e: any) {
+      toast("خطا در تغییر وضعیت: " + e.message, "error");
+    }
+    setTogglingId(null);
   };
 
-  // ─── Render ───────────────────────────────────────────────────────
+  // ── Bulk actions ──────────────────────────────────────────────────────────
+  const applyBulkPrices = () => {
+    if (!bulkMin && !bulkMax) { toast("حداقل یک مقدار وارد کن", "error"); return; }
+    setProducts(prev => prev.map(p => {
+      if (!selectedIds.has(p.variant_id)) return p;
+      return {
+        ...p,
+        ...(bulkMin ? { min_price: parseInt(bulkMin) } : {}),
+        ...(bulkMax ? { max_price: parseInt(bulkMax) } : {}),
+      };
+    }));
+    toast(`${selectedIds.size} محصول آپدیت شد`, "success");
+    setBulkMin(""); setBulkMax("");
+  };
+
+  const selectAll = () => {
+    if (selectedIds.size === filtered.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filtered.map(p => p.variant_id)));
+    }
+  };
+
+  const applyMinFormula = async () => {
+    if (!settings.min_price_formula) { toast("فرمول کف قیمت وارد کن", "error"); return; }
+    if (!confirm(`فرمول «${settings.min_price_formula}» به همه محصولات اعمال شود؟`)) return;
+    setApplyingFormula(true);
+    try {
+      const res = await fetch(`${API}/api/bot/apply_min_formula`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace_id: workspaceId, formula: settings.min_price_formula, step_price: stepPrice }),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        toast(`${data.updated_count} محصول آپدیت شد`, "success");
+        await loadProducts();
+      } else {
+        toast("خطا: " + (data.message || JSON.stringify(data)), "error");
+      }
+    } catch {
+      toast("خطای ارتباط با سرور", "error");
+    }
+    setApplyingFormula(false);
+  };
+
+  const testFormula = async (type: "buybox" | "min_price", formula: string) => {
+    const sampleValues = type === "buybox"
+      ? { competitor_price: 100000, reference_price: 150000, current_price: 98000, step_price: stepPrice, min_price: 70000, buy_box_price: 95000 }
+      : { reference_price: 150000, current_price: 98000, step_price: stepPrice, cost: 60000 };
+    try {
+      const res = await fetch(`${API}/api/formula/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ formula, formula_type: type, sample_values: sampleValues }),
+      });
+      const data = await res.json();
+      if (type === "buybox") setBuyboxTestResult(data);
+      else setMinPriceTestResult(data);
+    } catch {
+      const err = { success: false, error: "خطا در ارتباط با سرور" };
+      if (type === "buybox") setBuyboxTestResult(err);
+      else setMinPriceTestResult(err);
+    }
+  };
+
+  const handlePriceChange = (id: number, field: "min_price" | "max_price", value: string) => {
+    setProducts(prev => prev.map(p => p.variant_id === id ? { ...p, [field]: value } : p));
+  };
+
+  const copyLog = () => {
+    navigator.clipboard.writeText(logs.join("\n")).then(() => toast("لاگ‌ها کپی شد", "success"));
+  };
+
+  const clearLogs = () => {
+    fetch(`${API}/api/logs`, { method: "DELETE" }).catch(() => { });
+    toast("لاگ‌ها پاک شد", "info");
+  };
+
+  // ─── Styles ────────────────────────────────────────────────────────────────
+  const styles = {
+    sidebar: { width: 220, background: "#070d1a", borderRight: "1px solid #0f1f3d" } as const,
+    main: { background: "#040b18" } as const,
+    card: { background: "rgba(15,23,42,0.7)", border: "1px solid #0f1f3d", borderRadius: 16 } as const,
+    input: { background: "#0a1628", border: "1px solid #162040", color: "#e2e8f0", borderRadius: 10, outline: "none" } as const,
+    btn: (color: string) => ({
+      background: color + "22", border: `1px solid ${color}44`, color: color,
+      borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
+    }) as const,
+    table: { width: "100%", borderCollapse: "collapse" as const },
+  };
+
+  const navItems: { id: ActiveTab; label: string; Icon: React.FC }[] = [
+    { id: "dashboard", label: "داشبورد", Icon: Icon.Dashboard },
+    { id: "products", label: "محصولات", Icon: Icon.Products },
+    { id: "settings", label: "تنظیمات", Icon: Icon.Settings },
+    { id: "logs", label: "لاگ‌ها", Icon: Icon.Logs },
+  ];
+
+  // ─── Render helpers ────────────────────────────────────────────────────────
+  const renderDashboard = () => (
+    <div className="space-y-6">
+      {/* Bot control banner */}
+      <div className="rounded-2xl p-6 flex items-center gap-6 border"
+        style={{ background: isRunning ? "rgba(34,197,94,0.06)" : "rgba(15,23,42,0.8)", borderColor: isRunning ? "#22c55e33" : "#0f1f3d" }}>
+        <div className="flex-1">
+          <div className="flex items-center gap-3 mb-1">
+            <span className={`w-2.5 h-2.5 rounded-full ${isRunning ? "bg-green-400 animate-pulse" : "bg-slate-600"}`} />
+            <h2 className="text-base font-bold" style={{ color: isRunning ? "#4ade80" : "#94a3b8" }}>
+              {isRunning
+                ? `در حال رقابت — چرخه #${botState.cycle_count || 0} | استراتژی: ${settings.strategy_mode}`
+                : "ربات متوقف است"}
+            </h2>
+            {settings.dry_run && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold"
+                style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid #fbbf2433" }}>
+                DRY RUN
+              </span>
+            )}
+          </div>
+          <p className="text-xs" style={{ color: "#475569" }}>
+            {isRunning ? `آپ‌تایم: ${uptime} دقیقه | workspace: ${botState.workspace_id}` : "برای شروع روی دکمه کلیک کنید"}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <label className="text-[10px]" style={{ color: "#475569" }}>گام قیمت</label>
+              <input type="number" value={stepPrice} step={500}
+                onChange={e => setStepPrice(Number(e.target.value))} disabled={isRunning}
+                className="w-24 px-2 py-1 text-xs text-center"
+                style={{ ...styles.input, opacity: isRunning ? 0.5 : 1 }} />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[10px]" style={{ color: "#475569" }}>تاخیر (ثانیه)</label>
+              <input type="number" value={cycleDelay} step={30}
+                onChange={e => setCycleDelay(Number(e.target.value))} disabled={isRunning}
+                className="w-24 px-2 py-1 text-xs text-center"
+                style={{ ...styles.input, opacity: isRunning ? 0.5 : 1 }} />
+            </div>
+          </div>
+          <button onClick={toggleBot}
+            className="flex items-center gap-2 px-5 py-3 rounded-xl font-bold text-sm"
+            style={{
+              background: isRunning ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.15)",
+              border: `1px solid ${isRunning ? "#ef444444" : "#22c55e44"}`,
+              color: isRunning ? "#f87171" : "#4ade80",
+            }}>
+            {isRunning ? <><Icon.Stop /> توقف</> : <><Icon.Play /> شروع</>}
+          </button>
+        </div>
+      </div>
+
+      {/* Stats grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+        <StatCard label="کل محصولات" value={fmtNum(products.length)} sub={`${configured} تنظیم‌شده`} accent="#38bdf8" />
+        <StatCard label="بای‌باکس" value={fmtNum(buyboxWinners)}
+          sub={fmtPct(buyboxWinners, products.length) + " نرخ برد"} accent="#4ade80" pulse={isRunning && buyboxWinners > 0} />
+        <StatCard label="در رقابت" value={fmtNum(products.length - buyboxWinners)} accent="#f87171" />
+        <StatCard label="آپدیت قیمت" value={fmtNum(botState.total_updates || 0)} sub="جلسه جاری" accent="#c084fc" />
+        <StatCard label="خطای 429" value={fmtNum(botState.rate_limit_hits || 0)} sub="محدودیت نرخ" accent="#fb923c" />
+        <StatCard label="موجودی کل" value={fmtNum(totalStock)} sub="همه محصولات" accent="#22d3ee"
+          pulse={isRunning} />
+      </div>
+
+      {/* Recent logs preview */}
+      <div className="rounded-2xl overflow-hidden border" style={styles.card}>
+        <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: "#0f1f3d" }}>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-500/60" />
+            <span className="w-2 h-2 rounded-full bg-yellow-500/60" />
+            <span className="w-2 h-2 rounded-full bg-green-500/60" />
+            <span className="text-xs font-mono ml-2" style={{ color: "#475569" }}>live log</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={copyLog} className="text-[10px] px-2 py-1 rounded-lg flex items-center gap-1" style={styles.btn("#64748b")}>
+              <Icon.Copy /> کپی
+            </button>
+            <button onClick={clearLogs} className="text-[10px] px-2 py-1 rounded-lg flex items-center gap-1" style={styles.btn("#64748b")}>
+              <Icon.Trash /> پاک
+            </button>
+          </div>
+        </div>
+        <div ref={logsRef} className="h-52 overflow-y-auto p-4 space-y-0.5 font-mono text-xs" style={{ background: "#02060f" }}>
+          {logs.length === 0
+            ? <span style={{ color: "#1e3a5f" }}>// در انتظار لاگ...</span>
+            : logs.map((log, i) => {
+              const color = log.includes("✅") ? "#4ade80"
+                : log.includes("❌") || log.includes("⚠️") ? "#f87171"
+                  : log.includes("429") ? "#fb923c"
+                    : log.includes("⚔️") || log.includes("📈") || log.includes("💰") ? "#38bdf8"
+                      : "#475569";
+              return <div key={i} style={{ color, lineHeight: 1.6 }}>{log}</div>;
+            })}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderProducts = () => (
+    <div className="space-y-4">
+      {/* Toolbar */}
+      <div className="flex flex-wrap gap-3 items-center" style={styles.card && { padding: "16px 20px", ...styles.card }}>
+        {/* Search */}
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl flex-1" style={{ background: "#0a1628", border: "1px solid #162040", minWidth: 180 }}>
+          <Icon.Search />
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="جستجو در محصولات..." className="bg-transparent text-sm outline-none flex-1"
+            style={{ color: "#e2e8f0" }} />
+        </div>
+        {/* Filters */}
+        <div className="flex gap-1.5">
+          {([["all", "همه"], ["winning", "برنده"], ["losing", "بازنده"], ["configured", "تنظیم‌شده"], ["unconfigured", "بدون config"]] as [FilterMode, string][]).map(([k, l]) => (
+            <button key={k} onClick={() => setFilter(k)}
+              className="text-xs px-3 py-1.5 rounded-full font-medium"
+              style={{
+                background: filter === k ? "rgba(99,102,241,0.2)" : "transparent",
+                border: `1px solid ${filter === k ? "#6366f1" : "#0f1f3d"}`,
+                color: filter === k ? "#a5b4fc" : "#475569",
+              }}>{l}</button>
+          ))}
+        </div>
+        <div className="flex-1" />
+        {/* Sort */}
+        <select value={sortBy} onChange={e => setSortBy(e.target.value as any)}
+          className="text-xs px-3 py-2 rounded-xl"
+          style={{ background: "#0a1628", border: "1px solid #162040", color: "#94a3b8" }}>
+          <option value="none">ترتیب پیش‌فرض</option>
+          <option value="price">قیمت</option>
+          <option value="stock">موجودی</option>
+          <option value="title">نام</option>
+        </select>
+        <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
+          className="text-xs px-3 py-2 rounded-xl"
+          style={{ background: "#0a1628", border: "1px solid #162040", color: "#94a3b8" }}>
+          {sortDir === "asc" ? "↑ صعودی" : "↓ نزولی"}
+        </button>
+        {/* Actions */}
+        <button onClick={loadProducts} disabled={loading}
+          className="flex items-center gap-2 text-sm px-4 py-2 rounded-xl font-medium"
+          style={styles.btn("#38bdf8")}>
+          <Icon.Refresh />{loading ? "دریافت..." : "دریافت"}
+        </button>
+        <button onClick={saveConfigs} disabled={saving}
+          className="flex items-center gap-2 text-sm px-4 py-2 rounded-xl font-medium"
+          style={styles.btn("#4ade80")}>
+          <Icon.Save />{saving ? "ذخیره..." : "ذخیره"}
+        </button>
+      </div>
+
+      {/* Bulk actions bar (when something selected) */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 px-5 py-3 rounded-xl border" style={{ background: "rgba(99,102,241,0.08)", borderColor: "#6366f133" }}>
+          <span className="text-xs font-medium" style={{ color: "#a5b4fc" }}>{selectedIds.size} انتخاب شده</span>
+          <div className="flex items-center gap-2 mr-auto">
+            <input type="number" value={bulkMin} onChange={e => setBulkMin(e.target.value)}
+              placeholder="کف جمعی" className="w-28 px-3 py-1.5 text-xs text-center"
+              style={styles.input} />
+            <input type="number" value={bulkMax} onChange={e => setBulkMax(e.target.value)}
+              placeholder="سقف جمعی" className="w-28 px-3 py-1.5 text-xs text-center"
+              style={styles.input} />
+            <button onClick={applyBulkPrices}
+              className="text-xs px-4 py-1.5 rounded-lg font-semibold"
+              style={styles.btn("#a5b4fc")}>اعمال</button>
+            <button onClick={() => setSelectedIds(new Set())}
+              className="text-xs px-3 py-1.5 rounded-lg"
+              style={styles.btn("#f87171")}>لغو</button>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="rounded-2xl overflow-hidden border" style={styles.card}>
+        <div className="overflow-x-auto">
+          <table style={styles.table}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #0f1f3d", background: "rgba(15,23,42,0.5)" }}>
+                <th className="p-3 text-right">
+                  <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0}
+                    onChange={selectAll} className="w-3.5 h-3.5 rounded" />
+                </th>
+                {["وضعیت", "فعال", "کد", "نام محصول", "قیمت جاری", "مرجع", "موجودی", "کف ▼", "سقف ▲", "عملیات"].map(h => (
+                  <th key={h} className="p-3 text-right text-[11px] font-semibold" style={{ color: "#334155" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="text-center py-20 text-sm" style={{ color: "#1e3a5f" }}>
+                    {products.length === 0 ? "ابتدا محصولات را دریافت کنید" : "موردی یافت نشد"}
+                  </td>
+                </tr>
+              ) : filtered.map(p => {
+                const isDisc = discoveringId === String(p.variant_id);
+                const isToggling = togglingId === String(p.variant_id);
+                const isActive = p.is_active !== false; // default true
+                return (
+                  <tr key={p.variant_id}
+                    style={{ borderBottom: "1px solid #0a1220", opacity: isActive ? 1 : 0.45 }}
+                    className="transition-colors hover:bg-slate-900/40">
+                    <td className="p-3">
+                      <input type="checkbox" checked={selectedIds.has(p.variant_id)}
+                        onChange={() => setSelectedIds(prev => {
+                          const s = new Set(prev);
+                          s.has(p.variant_id) ? s.delete(p.variant_id) : s.add(p.variant_id);
+                          return s;
+                        })} className="w-3.5 h-3.5 rounded" />
+                    </td>
+                    <td className="p-3"><Badge win={p.is_buy_box_winner} /></td>
+                    <td className="p-3">
+                      <button onClick={() => !isToggling && toggleVariantActive(p.variant_id, isActive)}
+                        disabled={isToggling} className="transition-opacity" style={{ opacity: isToggling ? 0.5 : 1 }}>
+                        <Icon.Toggle on={isActive} />
+                      </button>
+                    </td>
+                    <td className="p-3 font-mono text-[11px]" style={{ color: "#334155" }}>{p.variant_id}</td>
+                    <td className="p-3" style={{ maxWidth: 220 }}>
+                      <span className="text-xs block truncate" style={{ color: "#94a3b8" }} title={p.title}>{p.title}</span>
+                    </td>
+                    <td className="p-3 font-mono text-sm font-bold" style={{ color: "#38bdf8" }}>{fmtNum(p.current_price)}</td>
+                    <td className="p-3 font-mono text-xs" style={{ color: "#334155" }}>{fmtNum(p.reference_price)}</td>
+                    <td className="p-3 text-xs font-mono" style={{ color: "#475569" }}>
+                      {fmtNum(p.seller_stock ?? p.stock)}
+                    </td>
+                    <td className="p-3">
+                      <input type="number" value={p.min_price} disabled={isDisc}
+                        onChange={e => handlePriceChange(p.variant_id, "min_price", e.target.value)}
+                        placeholder="کف" className="w-28 px-2 py-1.5 text-xs text-center"
+                        style={{ ...styles.input, opacity: isDisc ? 0.4 : 1 }} />
+                    </td>
+                    <td className="p-3">
+                      <input type="number" value={p.max_price} disabled={isDisc}
+                        onChange={e => handlePriceChange(p.variant_id, "max_price", e.target.value)}
+                        placeholder="سقف" className="w-28 px-2 py-1.5 text-xs text-center"
+                        style={{ ...styles.input, opacity: isDisc ? 0.4 : 1 }} />
+                    </td>
+                    <td className="p-3">
+                      <button onClick={() => autoDiscover(p.variant_id, p.reference_price, p.current_price)}
+                        disabled={isDisc || !p.current_price}
+                        className="flex items-center gap-1 text-[11px] font-semibold px-3 py-1.5 rounded-lg"
+                        style={{ background: "rgba(99,102,241,0.12)", border: "1px solid #6366f133", color: "#a5b4fc", opacity: isDisc || !p.current_price ? 0.4 : 1 }}>
+                        {isDisc ? <span className="animate-pulse">اسکن...</span> : <><Icon.Zap /> کشف</>}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-5 py-2.5 border-t text-xs flex items-center gap-3" style={{ borderColor: "#0f1f3d", color: "#334155" }}>
+          نمایش {filtered.length} از {products.length} محصول
+          {selectedIds.size > 0 && <span style={{ color: "#6366f1" }}>— {selectedIds.size} انتخاب‌شده</span>}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderSettings = () => {
+    const BUYBOX_PRESETS = [
+      { label: "یک گام زیر رقیب", formula: "competitor_price - step_price" },
+      { label: "۱٪ زیر رقیب", formula: "competitor_price * 0.99" },
+      { label: "دو گام زیر رقیب", formula: "competitor_price - step_price * 2" },
+      { label: "زیر رقیب ≥ کف", formula: "max(competitor_price - step_price, min_price)" },
+    ];
+    const MIN_PRESETS = [
+      { label: "۷۵٪ مرجع", formula: "reference_price * 0.75" },
+      { label: "۸۰٪ مرجع", formula: "reference_price * 0.80" },
+      { label: "۷۰٪ مرجع", formula: "reference_price * 0.70" },
+      { label: "هزینه+۲۰٪", formula: "cost * 1.20" },
+    ];
+    const FORMULA_VARS_BB = ["competitor_price", "reference_price", "current_price", "step_price", "min_price", "buy_box_price"];
+    const FORMULA_VARS_MIN = ["reference_price", "current_price", "step_price", "cost"];
+
+    const set = (k: keyof Settings) => (v: any) => setSettings(s => ({ ...s, [k]: v }));
+
+    return (
+      <div className="space-y-5 max-w-3xl">
+        {/* Strategy */}
+        <div className="rounded-2xl p-5 space-y-4 border" style={styles.card}>
+          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>استراتژی رقابت</h3>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { k: "aggressive", l: "تهاجمی", d: "همیشه یک گام زیر رقیب" },
+              { k: "conservative", l: "محافظه‌کار", d: "فقط وقتی فاصله بزرگ باشد" },
+              { k: "formula", l: "فرمول‌محور", d: "بر اساس فرمول سفارشی" },
+            ].map(s => (
+              <button key={s.k} onClick={() => set("strategy_mode")(s.k)}
+                className="p-3 rounded-xl border text-right transition-all"
+                style={{
+                  background: settings.strategy_mode === s.k ? "rgba(99,102,241,0.15)" : "#0a1628",
+                  borderColor: settings.strategy_mode === s.k ? "#6366f1" : "#162040",
+                  color: settings.strategy_mode === s.k ? "#a5b4fc" : "#475569",
+                }}>
+                <div className="font-semibold text-sm">{s.l}</div>
+                <div className="text-[10px] mt-1 opacity-70">{s.d}</div>
+              </button>
+            ))}
+          </div>
+
+          <div className={settings.strategy_mode !== "formula" ? "opacity-40 pointer-events-none" : ""}>
+            <FormulaInput label="فرمول قیمت بای‌باکس" hint="وقتی بای‌باکس نداریم، قیمت هدف را محاسبه می‌کند"
+              value={settings.buybox_formula} onChange={set("buybox_formula")}
+              variables={FORMULA_VARS_BB} presets={BUYBOX_PRESETS}
+              onTest={() => testFormula("buybox", settings.buybox_formula)} testResult={buyboxTestResult} />
+          </div>
+        </div>
+
+        {/* Min price formula */}
+        <div className="rounded-2xl p-5 space-y-4 border" style={styles.card}>
+          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>فرمول کف قیمت دسته‌جمعی</h3>
+          <FormulaInput label="فرمول کف قیمت" hint="برای محاسبه خودکار کف قیمت همه محصولات"
+            value={settings.min_price_formula} onChange={set("min_price_formula")}
+            variables={FORMULA_VARS_MIN} presets={MIN_PRESETS}
+            onTest={() => testFormula("min_price", settings.min_price_formula)} testResult={minPriceTestResult} />
+          <div className="flex items-center gap-3">
+            <button onClick={applyMinFormula} disabled={applyingFormula || !settings.min_price_formula}
+              className="text-xs px-4 py-2 rounded-xl font-semibold"
+              style={{ ...styles.btn("#c084fc"), opacity: applyingFormula || !settings.min_price_formula ? 0.4 : 1 }}>
+              {applyingFormula ? "در حال اعمال..." : "اعمال به همه محصولات"}
+            </button>
+            <p className="text-[10px]" style={{ color: "#334155" }}>قیمت دیجی‌کالا تغییر نمی‌کند — فقط config ذخیره می‌شود</p>
+          </div>
+        </div>
+
+        {/* Advanced settings */}
+        <div className="rounded-2xl p-5 space-y-5 border" style={styles.card}>
+          <h3 className="text-sm font-bold" style={{ color: "#94a3b8" }}>تنظیمات پیشرفته</h3>
+
+          {/* Guard rails */}
+          <div className="grid grid-cols-2 gap-4">
+            {[
+              { k: "variant_cooldown_seconds", l: "Cooldown هر تنوع (ثانیه)", type: "number" },
+              { k: "max_price_change_percent", l: "حداکثر تغییر قیمت (%)", type: "number", step: 0.5 },
+              { k: "max_consecutive_failures", l: "حداکثر خطای متوالی", type: "number" },
+              { k: "rate_limit_pause_seconds", l: "مکث بعد از 429 (ثانیه)", type: "number" },
+            ].map(f => (
+              <div key={f.k} className="space-y-1">
+                <label className="text-[11px]" style={{ color: "#475569" }}>{f.l}</label>
+                <input type={f.type} value={(settings as any)[f.k]} step={(f as any).step || 1}
+                  onChange={e => set(f.k as keyof Settings)(Number(e.target.value))}
+                  className="w-full px-3 py-2 text-sm" style={styles.input} />
+              </div>
+            ))}
+          </div>
+
+          {/* Timing */}
+          <div className="grid grid-cols-3 gap-4">
+            {[
+              { k: "request_delay_min", l: "تاخیر کمینه (ثانیه)", step: 0.5 },
+              { k: "request_delay_max", l: "تاخیر بیشینه (ثانیه)", step: 0.5 },
+              { k: "rate_limit_backoff_base", l: "پایه backoff 429", step: 5 },
+            ].map(f => (
+              <div key={f.k} className="space-y-1">
+                <label className="text-[11px]" style={{ color: "#475569" }}>{f.l}</label>
+                <input type="number" value={(settings as any)[f.k]} step={f.step}
+                  onChange={e => set(f.k as keyof Settings)(Number(e.target.value))}
+                  className="w-full px-3 py-2 text-sm" style={styles.input} />
+              </div>
+            ))}
+          </div>
+
+          {/* Delivery */}
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-1">
+              <label className="text-[11px]" style={{ color: "#475569" }}>مدت تحویل (روز)</label>
+              <input type="number" min={1} value={settings.lead_time}
+                onChange={e => set("lead_time")(Number(e.target.value))}
+                className="w-full px-3 py-2 text-sm" style={styles.input} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[11px]" style={{ color: "#475569" }}>حداکثر سفارش</label>
+              <input type="number" min={1} value={settings.max_per_order}
+                onChange={e => set("max_per_order")(Number(e.target.value))}
+                className="w-full px-3 py-2 text-sm" style={styles.input} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[11px]" style={{ color: "#475569" }}>نوع ارسال</label>
+              <select value={settings.shipping_type} onChange={e => set("shipping_type")(e.target.value)}
+                className="w-full px-3 py-2 text-sm" style={styles.input}>
+                <option value="seller">فروشنده</option>
+                <option value="digikala">دیجی‌کالا</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Toggles */}
+          <div className="flex gap-6">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <button onClick={() => set("dry_run")(!settings.dry_run)}>
+                <Icon.Toggle on={settings.dry_run} />
+              </button>
+              <div>
+                <div className="text-xs font-semibold" style={{ color: "#94a3b8" }}>حالت آزمایشی (Dry Run)</div>
+                <div className="text-[10px]" style={{ color: "#334155" }}>قیمت ارسال نمی‌شود</div>
+              </div>
+            </label>
+          </div>
+
+          {/* Webhook */}
+          <div className="space-y-1">
+            <label className="text-[11px]" style={{ color: "#475569" }}>Webhook هشدار (اختیاری)</label>
+            <input type="url" value={settings.notify_webhook_url} dir="ltr"
+              onChange={e => set("notify_webhook_url")(e.target.value)}
+              placeholder="https://hooks.slack.com/..."
+              className="w-full px-3 py-2 text-sm font-mono" style={styles.input} />
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button onClick={saveSettings} disabled={savingSettings}
+              className="flex items-center gap-2 text-sm font-bold px-6 py-2.5 rounded-xl"
+              style={styles.btn("#4ade80")}>
+              <Icon.Save />{savingSettings ? "در حال ذخیره..." : "ذخیره تنظیمات"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderLogs = () => (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <h3 className="text-sm font-semibold" style={{ color: "#94a3b8" }}>لاگ‌های زنده</h3>
+        <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#0a1628", color: "#475569" }}>
+          {logs.length} خط
+        </span>
+        <div className="flex gap-2 mr-auto">
+          <button onClick={copyLog} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={styles.btn("#64748b")}>
+            <Icon.Copy /> کپی
+          </button>
+          <button onClick={clearLogs} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={styles.btn("#f87171")}>
+            <Icon.Trash /> پاک
+          </button>
+        </div>
+      </div>
+      <div className="rounded-2xl overflow-hidden border" style={{ ...styles.card, background: "#02060f" }}>
+        <div ref={logsRef} className="h-[calc(100vh-240px)] overflow-y-auto p-5 space-y-0.5 font-mono text-xs">
+          {logs.length === 0
+            ? <span style={{ color: "#1e3a5f" }}>// در انتظار لاگ...</span>
+            : logs.map((log, i) => {
+              const color = log.includes("✅") ? "#4ade80"
+                : log.includes("❌") ? "#f87171"
+                  : log.includes("⚠️") ? "#fbbf24"
+                    : log.includes("429") ? "#fb923c"
+                      : log.includes("⚔️") || log.includes("📈") || log.includes("💰") ? "#38bdf8"
+                        : log.includes("━━") ? "#1e3a5f"
+                          : "#334155";
+              return (
+                <div key={i} style={{ color, lineHeight: 1.7 }}>{log}</div>
+              );
+            })}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ─── Layout ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="min-h-screen text-slate-100 p-6"
-      dir="rtl"
-      style={{
-        background: "linear-gradient(135deg, #0a0f1a 0%, #0d1526 50%, #0a0f1a 100%)",
-        fontFamily: "'Vazirmatn', 'Tahoma', sans-serif",
-      }}
-    >
+    <div className="flex h-screen overflow-hidden" dir="rtl" style={{ fontFamily: "'Vazirmatn', 'Tahoma', sans-serif", ...styles.main }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
         * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
-        .glow-green { box-shadow: 0 0 20px rgba(34,197,94,0.2); }
-        .glow-red   { box-shadow: 0 0 20px rgba(239,68,68,0.15); }
-        @keyframes scanline { 0%{top:0} 100%{top:100%} }
-        .terminal-scanline::before {
-          content:''; position:absolute; left:0; right:0; height:1px;
-          background:linear-gradient(90deg,transparent,rgba(34,197,94,0.1),transparent);
-          animation: scanline 4s linear infinite;
-        }
+        ::-webkit-scrollbar-thumb { background: #162040; border-radius: 4px; }
+        @keyframes toastIn { from { opacity:0; transform: translateY(-8px) scale(0.97); } to { opacity:1; transform: none; } }
+        input[type=number]::-webkit-inner-spin-button { opacity:0.3; }
+        select option { background: #0a1628; }
       `}</style>
 
-      <div className="max-w-[1600px] mx-auto space-y-5">
+      <ToastContainer toasts={toasts} remove={removeToast} />
 
-        {/* ── Header ── */}
-        <div className="flex items-center justify-between">
+      {/* Sidebar */}
+      <aside className="flex flex-col py-6 gap-1" style={styles.sidebar}>
+        {/* Logo */}
+        <div className="px-5 mb-6">
+          <div className="text-lg font-bold tracking-tight" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+            <span style={{ color: "#38bdf8" }}>DK</span>
+            <span style={{ color: "#334155" }}>_</span>
+            <span style={{ color: "#475569" }}>Repricer</span>
+          </div>
+          <div className="text-[10px] mt-0.5" style={{ color: "#1e3a5f" }}>v4.0 — production</div>
+        </div>
+
+        {/* Nav */}
+        {navItems.map(item => (
+          <button key={item.id} onClick={() => setTab(item.id)}
+            className="flex items-center gap-3 mx-3 px-4 py-2.5 rounded-xl text-sm font-medium text-right transition-all"
+            style={{
+              background: tab === item.id ? "rgba(56,189,248,0.1)" : "transparent",
+              color: tab === item.id ? "#38bdf8" : "#334155",
+              borderLeft: tab === item.id ? "2px solid #38bdf8" : "2px solid transparent",
+            }}>
+            <item.Icon />
+            {item.label}
+          </button>
+        ))}
+
+        {/* Workspace select */}
+        <div className="mt-auto px-4 space-y-1">
+          <label className="text-[10px]" style={{ color: "#1e3a5f" }}>Workspace</label>
+          <input type="number" value={workspaceId} min={1}
+            onChange={e => setWorkspaceId(Number(e.target.value))}
+            className="w-full px-3 py-1.5 text-xs text-center rounded-lg"
+            style={{ background: "#040b18", border: "1px solid #0f1f3d", color: "#334155" }} />
+        </div>
+
+        {/* Bot status badge */}
+        <div className="mx-4 mt-2 px-3 py-2 rounded-xl flex items-center gap-2"
+          style={{ background: isRunning ? "rgba(34,197,94,0.06)" : "#040b18", border: `1px solid ${isRunning ? "#22c55e22" : "#0f1f3d"}` }}>
+          <span className={`w-1.5 h-1.5 rounded-full ${isRunning ? "bg-green-400 animate-pulse" : "bg-slate-700"}`} />
+          <span className="text-[10px] font-medium" style={{ color: isRunning ? "#4ade80" : "#1e3a5f" }}>
+            {isRunning ? `چرخه #${botState.cycle_count || 0}` : "متوقف"}
+          </span>
+        </div>
+      </aside>
+
+      {/* Main content */}
+      <main className="flex-1 overflow-auto p-7">
+        {/* Page header */}
+        <div className="flex items-center justify-between mb-6">
           <div>
-            <h1
-              className="text-2xl font-bold tracking-tight"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              <span className="text-cyan-400">DK</span>
-              <span className="text-slate-300">_Repricer</span>
-              <span className="text-slate-600"> v3.0</span>
+            <h1 className="text-lg font-bold" style={{ color: "#e2e8f0" }}>
+              {navItems.find(n => n.id === tab)?.label}
             </h1>
-            <p className="text-slate-500 text-sm mt-0.5">موتور هوشمند رقابت قیمت دیجی‌کالا</p>
-          </div>
-          <div
-            className={`flex items-center gap-2 px-4 py-2 rounded-full border text-sm font-medium ${
-              isRunning
-                ? "border-green-500/40 text-green-400 bg-green-500/10 glow-green"
-                : "border-slate-600 text-slate-400 bg-slate-800/50"
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${isRunning ? "bg-green-400 animate-pulse" : "bg-slate-600"}`}
-            />
-            {isRunning
-              ? `در حال رقابت | چرخه #${botState.cycle_count || 0} | ${strategyLabel[settings.strategy_mode] || ""}`
-              : "متوقف"}
+            <p className="text-xs mt-0.5" style={{ color: "#334155" }}>
+              {tab === "dashboard" && "نمای کلی سیستم قیمت‌گذاری"}
+              {tab === "products" && `${products.length} محصول فعال | ${configured} تنظیم‌شده`}
+              {tab === "settings" && "پیکربندی پیشرفته ربات"}
+              {tab === "logs" && "لاگ‌های زنده سیستم"}
+            </p>
           </div>
         </div>
 
-        {/* ── Stats Row ── */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-          <StatCard label="محصولات فعال"  value={fmtNum(products.length)}      sub={`${stats.configured} تنظیم‌شده`} color="cyan" />
-          <StatCard label="BuyBox دارم"   value={fmtNum(buyboxWinners)}
-            sub={products.length ? `${Math.round(buyboxWinners / products.length * 100)}% نرخ برد` : ""}
-            color="green" pulse={isRunning && buyboxWinners > 0}
-          />
-          <StatCard label="در حال باخت"   value={fmtNum(losing)}               color="red" />
-          <StatCard label="آپدیت قیمت"    value={fmtNum(botState.total_updates)} sub="از ابتدای جلسه" color="violet" />
-          <StatCard label="برخورد 429"    value={fmtNum(botState.rate_limit_hits || 0)} sub="محدودیت نرخ" color="rose" />
-          <StatCard label="آپ‌تایم"        value={isRunning ? `${uptime}m` : "—"}
-            sub={botState.step_price ? `step: ${fmtNum(botState.step_price)}` : ""}
-            color="amber" pulse={isRunning}
-          />
-        </div>
-
-        {/* ── Control Panel ── */}
-        <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl p-4 backdrop-blur-sm">
-          <div className="flex flex-wrap gap-3 items-end">
-            {[
-              { label: "Workspace ID",        value: workspaceId,  setter: setWorkspaceId,  type: "number", width: "w-28", step: undefined },
-              { label: "گام قیمت (تومان)",    value: stepPrice,    setter: setStepPrice,    type: "number", width: "w-32", step: 500 },
-              { label: "تاخیر چرخه (ثانیه)", value: cycleDelay,  setter: setCycleDelay,   type: "number", width: "w-32", step: 30 },
-            ].map(({ label, value, setter, type, width, step }) => (
-              <div key={label} className="flex flex-col gap-1">
-                <label className="text-xs text-slate-500">{label}</label>
-                <input
-                  type={type}
-                  value={value}
-                  step={step}
-                  onChange={(e) => setter(Number(e.target.value) as any)}
-                  className={`bg-slate-900 border border-slate-600 text-slate-200 rounded-lg px-3 py-2 text-sm ${width} text-center focus:border-cyan-500 outline-none`}
-                />
-              </div>
-            ))}
-
-            <div className="flex-1" />
-
-            <button
-              onClick={() => setShowSettings((v) => !v)}
-              className={`border text-sm font-medium px-4 py-2 rounded-lg transition-colors ${
-                showSettings
-                  ? "bg-cyan-700/30 border-cyan-500/50 text-cyan-300"
-                  : "bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600"
-              }`}
-            >
-              ⚙️ تنظیمات {showSettings ? "▲" : "▼"}
-            </button>
-            <button
-              onClick={loadProducts}
-              disabled={loading}
-              className="bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-            >
-              {loading ? "⏳ دریافت..." : "🔄 دریافت محصولات"}
-            </button>
-            <button
-              onClick={saveConfigs}
-              disabled={saving}
-              className="bg-emerald-700/80 hover:bg-emerald-600 text-white border border-emerald-600/50 px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-            >
-              {saving ? "⏳" : "💾 ذخیره"}
-            </button>
-            <button
-              onClick={toggleBot}
-              className={`px-6 py-2 rounded-lg text-sm font-bold border transition-all ${
-                isRunning
-                  ? "bg-red-600/80 hover:bg-red-500 border-red-500/50 text-white glow-red"
-                  : "bg-cyan-600/80 hover:bg-cyan-500 border-cyan-500/50 text-white"
-              }`}
-            >
-              {isRunning ? "⏹ توقف ربات" : "▶ شروع ربات"}
-            </button>
-          </div>
-        </div>
-
-        {/* ── Settings Panel ── */}
-        {showSettings && (
-          <SettingsPanel
-            settings={settings}
-            onChange={setSettings}
-            onSave={saveSettings}
-            saving={savingSettings}
-            onApplyMinFormula={applyMinFormula}
-            applyingFormula={applyingFormula}
-            workspaceId={workspaceId}
-            stepPrice={stepPrice}
-          />
-        )}
-
-        {/* ── Filter Tabs ── */}
-        {products.length > 0 && (
-          <div className="flex gap-2">
-            {(
-              [
-                ["all", "همه"],
-                ["winning", "برنده BuyBox"],
-                ["losing", "در حال باخت"],
-                ["configured", "تنظیم‌شده"],
-              ] as [string, string][]
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setFilter(key)}
-                className={`px-4 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                  filter === key
-                    ? "bg-cyan-600/30 border-cyan-500/60 text-cyan-300"
-                    : "bg-transparent border-slate-700 text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-            <span className="text-xs text-slate-600 flex items-center mr-2">
-              نمایش {filtered.length} از {products.length}
-            </span>
-          </div>
-        )}
-
-        {/* ── Products Table ── */}
-        <div className="bg-slate-800/30 border border-slate-700/40 rounded-xl overflow-hidden backdrop-blur-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-right">
-              <thead>
-                <tr className="border-b border-slate-700/60 bg-slate-900/40">
-                  {["وضعیت", "کد تنوع", "نام محصول", "قیمت فعلی", "قیمت مرجع", "کف مجاز ▼", "سقف مجاز ▲", "عملیات"].map((h) => (
-                    <th key={h} className="p-3 text-slate-500 font-medium text-xs">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="text-center py-16 text-slate-600">
-                      {products.length === 0 ? "ابتدا محصولات را دریافت کنید" : "موردی یافت نشد"}
-                    </td>
-                  </tr>
-                )}
-                {filtered.map((p) => {
-                  const isDiscovering = discoveringId === String(p.variant_id);
-                  return (
-                    <tr
-                      key={p.variant_id}
-                      className="border-b border-slate-700/30 hover:bg-slate-700/20 transition-colors"
-                    >
-                      <td className="p-3">
-                        {p.is_buy_box_winner ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-900/50 text-emerald-400 border border-emerald-700/40 px-2 py-0.5 rounded-full">
-                            🏆 BuyBox
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-red-900/40 text-red-400 border border-red-800/40 px-2 py-0.5 rounded-full">
-                            ⚔️ رقابت
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-3 font-mono text-xs text-slate-500">{p.variant_id}</td>
-                      <td className="p-3 max-w-[200px]">
-                        <span className="text-slate-300 truncate block" title={p.title}>{p.title}</span>
-                      </td>
-                      <td className="p-3 font-bold text-cyan-400 font-mono text-sm">{fmtNum(p.current_price)}</td>
-                      <td className="p-3 text-slate-500 font-mono text-xs">{fmtNum(p.reference_price)}</td>
-                      <td className="p-3">
-                        <input
-                          type="number"
-                          value={p.min_price}
-                          onChange={(e) => handlePriceChange(p.variant_id, "min_price", e.target.value)}
-                          placeholder="کف"
-                          disabled={isDiscovering}
-                          className="bg-slate-900/80 border border-slate-600 hover:border-slate-500 focus:border-cyan-500 text-slate-200 rounded-lg px-2 py-1.5 w-28 text-center text-xs outline-none transition-colors placeholder-slate-600 disabled:opacity-40"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <input
-                          type="number"
-                          value={p.max_price}
-                          onChange={(e) => handlePriceChange(p.variant_id, "max_price", e.target.value)}
-                          placeholder="سقف"
-                          disabled={isDiscovering}
-                          className="bg-slate-900/80 border border-slate-600 hover:border-slate-500 focus:border-cyan-500 text-slate-200 rounded-lg px-2 py-1.5 w-28 text-center text-xs outline-none transition-colors placeholder-slate-600 disabled:opacity-40"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <button
-                          onClick={() => autoDiscover(p.variant_id, p.reference_price, p.current_price)}
-                          disabled={isDiscovering || !p.current_price}
-                          className="text-xs font-semibold bg-indigo-900/60 hover:bg-indigo-700/60 text-indigo-300 border border-indigo-700/40 hover:border-indigo-500/60 px-3 py-1.5 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          {isDiscovering ? <span className="animate-pulse">⚡ اسکن...</span> : "⚡ کشف خودکار"}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ── Terminal ── */}
-        <div className="relative bg-[#050c14] border border-slate-700/40 rounded-xl overflow-hidden terminal-scanline">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-700/40 bg-slate-900/60">
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full bg-red-500/60" />
-              <span className="w-3 h-3 rounded-full bg-amber-500/60" />
-              <span className="w-3 h-3 rounded-full bg-green-500/60" />
-              <span className="text-slate-500 text-xs font-mono mr-2">repricer.log — live feed</span>
-              {(botState.rate_limit_hits || 0) > 0 && (
-                <span className="text-[10px] bg-rose-900/50 border border-rose-700/40 text-rose-400 px-2 py-0.5 rounded-full">
-                  429×{botState.rate_limit_hits}
-                </span>
-              )}
-            </div>
-            <button
-              onClick={() => fetch(`${API}/api/logs`, { method: "DELETE" }).catch(() => {})}
-              className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors"
-            >
-              پاک کردن
-            </button>
-          </div>
-          <div ref={logsRef} className="h-56 overflow-y-auto p-4 space-y-1">
-            {logs.length === 0 ? (
-              <div className="text-slate-700 font-mono text-xs">// در انتظار لاگ...</div>
-            ) : (
-              logs.map((log, i) => {
-                const isSuccess = log.includes("✅");
-                const isError   = log.includes("❌") || log.includes("⚠️");
-                const is429     = log.includes("429");
-                const isAction  = log.includes("⚔️") || log.includes("📈") || log.includes("💰");
-                const isBuybox  = log.includes("🏆") || log.includes("BuyBox");
-                return (
-                  <div
-                    key={i}
-                    className={`font-mono text-xs leading-5 ${
-                      is429      ? "text-rose-400" :
-                      isSuccess  ? "text-emerald-400" :
-                      isError    ? "text-red-400" :
-                      isAction   ? "text-cyan-300" :
-                      isBuybox   ? "text-amber-300" :
-                      "text-slate-400"
-                    }`}
-                  >
-                    {log}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-      </div>
+        {tab === "dashboard" && renderDashboard()}
+        {tab === "products" && renderProducts()}
+        {tab === "settings" && renderSettings()}
+        {tab === "logs" && renderLogs()}
+      </main>
     </div>
   );
 }
