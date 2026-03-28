@@ -122,3 +122,12 @@
 3. فاز ۳ (کیفیت تصمیم‌گیری)
 4. فاز ۴ (تست/مانیتورینگ)
 5. فاز ۵ (عملیاتی)
+
+---
+
+## وضعیت اجرای فعلی (تا فاز ۵)
+- ✅ **فاز ۱**: مسیر فایل‌ها پایدار شد، حلقه اصلی fail-safe شد، CSRF header اضافه شد.
+- ✅ **فاز ۲**: لایه `DigikalaSellerClient` برای retry/jitter اضافه شد و parsing پاسخ write سخت‌گیرانه‌تر شد.
+- ✅ **فاز ۳**: Strategyها به ماژول جدا منتقل شد + guardrailهای `cooldown` و `max_price_change_percent` + `dry_run`.
+- ✅ **فاز ۴**: endpointهای `readiness` و `auth diagnostics` برای مانیتورینگ سریع اضافه شد.
+- ✅ **فاز ۵**: پشتیبانی از secret توکن با env (`DIGIKALA_AUTH_TOKEN`) و webhook هشدار (`notify_webhook_url`) اضافه شد.
