@@ -1,92 +1,149 @@
-"""
-backend/utils/strategies.py
+"""Pricing strategies with adaptive memory for Digikala repricer."""
 
-استراتژی قیمت‌گذاری — ساده‌سازی شده به یک استراتژی هوشمند تک‌منظوره
-"""
+from __future__ import annotations
+
+import json
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+LEARNING_MEMORY_FILE = BASE_DIR / "learning_memory.json"
+
 
 @dataclass
 class StrategyInput:
-    competitor_price: int    # ارزان‌ترین رقیب
-    current_price: int       # قیمت فعلی من
-    min_price: int           # کف مجاز
-    max_price: int           # سقف مجاز
-    step: int                # گام قیمت (مثلا 10000)
-    is_buy_box_winner: bool  # آیا الان buybox دارم؟
-    alone_in_market: bool    # آیا رقیبی نیست؟
-    winner_info: Dict[str, Any] = None # اطلاعات برنده برای تشخیص غول‌ها
+    """Input payload for price decision making."""
+
+    competitor_price: int
+    current_price: int
+    min_price: int
+    max_price: int
+    step: int
+    is_buy_box_winner: bool
+    alone_in_market: bool
+    winner_info: Optional[Dict[str, Any]] = None
 
 
-class SmartStrategy:
-    """
-    استراتژی هوشمند (تنها استراتژی سیستم):
-    ۱. برنده هستم:
-       - رقیب نیست -> برو به سقف قیمت
-       - رقیب هست -> قیمت را ببر دقیقاً یک گام زیر نفر دوم (بیشینه‌سازی سود)
-    ۲. بازنده هستم:
-       - رقیب غول است (بالای 10هزار رای) -> 1.2 درصد زیر قیمت او
-       - رقیب معمولی است -> یک گام (step) زیر قیمت او
-    """
-    name = "smart"
-    label = "هوشمند (Profit & Attack)"
-    description = "به صورت خودکار رقبای قدرتمند را تشخیص داده و در زمان پیروزی، سود را ماکزیمم می‌کند."
+class AdaptiveMemory:
+    """Persistent memory store that tracks learned gap per competitor seller."""
+
+    def __init__(self, path: Path = LEARNING_MEMORY_FILE) -> None:
+        self.path = path
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._cache = data
+            except Exception:
+                self._cache = {}
+        self._loaded = True
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", encoding="utf-8") as f:
+            json.dump(self._cache, f, ensure_ascii=False, indent=2)
+
+    def get_competitor_state(self, competitor_seller_id: int) -> Dict[str, Any]:
+        """Return known state for a competitor seller id."""
+        self._load()
+        return self._cache.get(str(competitor_seller_id), {}).copy()
+
+    def record_result(self, competitor_seller_id: int, gap: int, won: bool) -> None:
+        """Store the latest applied gap and whether it won buy-box."""
+        self._load()
+        self._cache[str(competitor_seller_id)] = {
+            "last_gap": int(max(0, gap)),
+            "last_result": "win" if won else "loss",
+        }
+        self._save()
+
+
+class AdaptiveSniperStrategy:
+    """Adaptive sniper strategy that learns per-competitor winning gap."""
+
+    name = "adaptive_sniper"
+    label = "Adaptive Sniper AI"
+    description = "یادگیری فاصله قیمتی بهینه برای هر رقیب با حافظه تاریخی."
+
+    def __init__(self, memory: Optional[AdaptiveMemory] = None) -> None:
+        self.memory = memory or AdaptiveMemory()
+
+    @staticmethod
+    def _clamp(target: int, min_price: int, max_price: int) -> int:
+        return max(min_price, min(max_price, target))
+
+    @staticmethod
+    def _initial_gap(step: int, item_votes: int) -> int:
+        if item_votes >= 10000:
+            return step * 3
+        if item_votes >= 3000:
+            return step * 2
+        return step
 
     def decide(self, d: StrategyInput) -> Optional[int]:
-        target = None
-        
-        # ─── حالت ۱: من برنده هستم (بیشینه‌سازی سود) ───
+        """Calculate target price based on current context and learned memory."""
+        step = max(1, int(d.step))
+
         if d.is_buy_box_winner:
             if d.alone_in_market or d.competitor_price <= 0:
-                # تنها هستم، پرواز به سقف
-                target = d.max_price
-            else:
-                # رقیب دارم، قیمت را می‌برم یک پله زیر ارزان‌ترین رقیب
-                target = d.competitor_price - d.step
-                if target > d.max_price:
-                    target = d.max_price
-                if target <= d.current_price:
-                    return None # جایگاهم خوب است، تغییری نیاز نیست
-                    
-            return target
+                return self._clamp(d.max_price, d.min_price, d.max_price)
 
-        # ─── حالت ۲: من بازنده هستم (حمله به بای‌باکس) ───
-        if not d.winner_info:
-             # اطلاعاتی از برنده نداریم، استاندارد حمله می‌کنیم
-             target = d.current_price - d.step
+            candidate = d.competitor_price - step
+            if candidate <= d.current_price:
+                return None
+            return self._clamp(candidate, d.min_price, d.max_price)
+
+        if d.competitor_price <= 0:
+            return None
+
+        winner_info = d.winner_info or {}
+        competitor_seller_id = int(winner_info.get("seller_id") or 0)
+        item_votes = int(winner_info.get("item_votes") or 0)
+
+        state = self.memory.get_competitor_state(competitor_seller_id) if competitor_seller_id else {}
+        last_gap = int(state.get("last_gap") or 0)
+        last_result = state.get("last_result")
+
+        if last_gap > 0:
+            gap = last_gap if last_result == "win" else last_gap + step
         else:
-            w_price = d.winner_info.get("price", 0)
-            w_votes = d.winner_info.get("votes", 0)
-            my_votes = 460 # TODO: می‌تواند بعداً از پروفایل شما خوانده شود
-            
-            # تشخیص رقیب غول‌پیکر
-            if w_votes > 10000 and my_votes < 1000:
-                drop_amount = int(w_price * 0.012) # 1.2 درصد کاهش
-                target = w_price - drop_amount
-                target = (target // 10000) * 10000 # رند کردن به ده هزار تومان
-            else:
-                # رقیب معمولی
-                target = w_price - d.step
-                
-        # اعمال گارد ضرر
-        if target < d.min_price:
-            return None # نمی‌ارزد
-            
-        return min(target, d.max_price)
+            gap = self._initial_gap(step=step, item_votes=item_votes)
 
-# ─── رجیستری ──────────────────────────────────────────────────────────────────
-# حالا فقط یک استراتژی داریم
-STRATEGIES: dict = {
-    "smart": SmartStrategy(),
-    # برای جلوگیری از کرش کردن فرانت‌اند اگر دیتابیس قدیمی نام استراتژی‌های قبلی را ذخیره کرده باشد:
-    "aggressive": SmartStrategy(),
-    "conservative": SmartStrategy(),
-    "step_up": SmartStrategy(),
+        target = d.competitor_price - gap
+        target = self._clamp(target, d.min_price, d.max_price)
+        if target == d.current_price:
+            return None
+        return target
+
+
+ADAPTIVE_STRATEGY = AdaptiveSniperStrategy()
+
+STRATEGIES: Dict[str, AdaptiveSniperStrategy] = {
+    "adaptive_sniper": ADAPTIVE_STRATEGY,
+    "smart": ADAPTIVE_STRATEGY,
+    "aggressive": ADAPTIVE_STRATEGY,
+    "conservative": ADAPTIVE_STRATEGY,
+    "step_up": ADAPTIVE_STRATEGY,
 }
 
 STRATEGY_INFO = [
-    {"key": "smart", "label": "هوشمند (Profit & Attack)", "desc": SmartStrategy.description},
+    {
+        "key": "adaptive_sniper",
+        "label": AdaptiveSniperStrategy.label,
+        "desc": AdaptiveSniperStrategy.description,
+    }
 ]
 
-def get_strategy(name: str):
-    return STRATEGIES.get(name, STRATEGIES["smart"])
+
+def get_strategy(name: str) -> AdaptiveSniperStrategy:
+    """Get strategy instance by configured key with backward compatibility."""
+    return STRATEGIES.get(name, ADAPTIVE_STRATEGY)
