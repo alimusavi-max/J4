@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Callable, Tuple, Dict, Any
 
 from utils.manual_cookie_login import ManualCookieManager
-from utils.strategies import StrategyInput, get_strategy, STRATEGY_INFO
+from utils.strategies import StrategyInput, get_strategy
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SESSIONS_DIR = BASE_DIR / "panel_sessions"
@@ -194,9 +194,16 @@ class DigikalaRepricer:
     # =========================================================================
     # ─── GET: قیمت و رتبه‌ی رقبا (ارتقا یافته) ────────────────────────────────
     # =========================================================================
-    def get_competitor_prices(self, product_id: int, my_seller_id: int) -> Tuple[Optional[int], bool, Dict[str, Any]]:
+    def get_competitor_prices(
+        self,
+        product_id: int,
+        my_seller_id: int,
+        my_variant_id: int,
+    ) -> Tuple[Optional[int], bool, Dict[str, Any]]:
         """
-        برگشت: (ارزان‌ترین_رقیب, تنها_در_بازار, اطلاعات_کامل_برنده)
+        برگشت: (ارزان‌ترین_رقیب_همسان, تنها_در_بازار, اطلاعات_برنده)
+        - فقط تنوع‌های هم‌رنگ و هم‌گارانتی بررسی می‌شوند.
+        - فقط تنوع‌های marketable در نظر گرفته می‌شوند.
         """
         url = f"https://api.digikala.com/v2/product/{product_id}/"
         try:
@@ -208,33 +215,44 @@ class DigikalaRepricer:
             data = resp.json()
             product_data = data.get("data", {}).get("product", {})
             
-            # استخراج لیست تنوع‌ها و تنوع برنده (default_variant)
             variants = product_data.get("variants", [])
-            default_variant = product_data.get("default_variant", {})
-            winner_variant_id = default_variant.get("id")
+            my_variant = next((v for v in variants if int(v.get("id", 0)) == int(my_variant_id)), None)
+            if not my_variant:
+                self.log(f"⚠️ variant {my_variant_id} داخل product {product_id} پیدا نشد.")
+                return None, False, {}
 
-            prices = []
-            winner_info = {}
-            
-            for v in variants:
-                seller = v.get("seller", {})
-                seller_id = seller.get("id")
-                price = v.get("price", {}).get("selling_price", 0)
-                status = v.get("status", "") # استفاده از status به جای stock
-                
-                # آیا این تنوع، همان تنوع برنده (default_variant) است؟
-                is_winner = (v.get("id") == winner_variant_id)
-                
-                if is_winner:
-                    winner_info = {
-                        "seller_id": seller_id,
-                        "price": price,
-                        "rating": seller.get("rating", {}).get("total_rate", 0),
-                        "votes": seller.get("rating", {}).get("total_count", 0) # تعداد آرا برای تشخیص غول
-                    }
+            my_color_id = (my_variant.get("color") or {}).get("id")
+            my_warranty_id = (my_variant.get("warranty") or {}).get("id")
 
-                # فقط رقبایی که وضعیتشان marketable (موجود) است را به لیست رقبا اضافه کن
-                if seller_id and seller_id != my_seller_id and price > 0 and status == "marketable":
+            def _is_same_variant_family(variant: Dict[str, Any]) -> bool:
+                color_id = (variant.get("color") or {}).get("id")
+                warranty_id = (variant.get("warranty") or {}).get("id")
+                return color_id == my_color_id and warranty_id == my_warranty_id
+
+            same_family = [v for v in variants if _is_same_variant_family(v)]
+            marketable = [v for v in same_family if v.get("status") == "marketable"]
+            marketable_sorted = sorted(
+                marketable,
+                key=lambda x: int((x.get("price") or {}).get("selling_price") or 0),
+            )
+
+            winner_info: Dict[str, Any] = {}
+            if marketable_sorted:
+                winner_variant = marketable_sorted[0]
+                winner_seller = winner_variant.get("seller") or {}
+                statistics = winner_variant.get("statistics") or {}
+                winner_info = {
+                    "seller_id": winner_seller.get("id"),
+                    "price": int((winner_variant.get("price") or {}).get("selling_price") or 0),
+                    "item_votes": int(statistics.get("total_count") or 0),
+                    "variant_id": winner_variant.get("id"),
+                }
+
+            prices: list[int] = []
+            for v in marketable:
+                seller_id = int((v.get("seller") or {}).get("id") or 0)
+                price = int((v.get("price") or {}).get("selling_price") or 0)
+                if seller_id and seller_id != my_seller_id and price > 0:
                     prices.append(price)
 
             if not prices:
@@ -548,7 +566,11 @@ class DigikalaRepricer:
             step = int(conf.get("step", default_step))
 
             if product_id:
-                comp_price, alone, winner_info = self.get_competitor_prices(int(product_id), my_seller_id)
+                comp_price, alone, winner_info = self.get_competitor_prices(
+                    int(product_id),
+                    my_seller_id,
+                    int(vid),
+                )
             else:
                 comp_price, alone, winner_info = None, False, {}
                 self.log(f"⚠️ [{item['title'][:20]}] product_id ندارد — رقبا بررسی نشد")
@@ -559,43 +581,20 @@ class DigikalaRepricer:
                 self.stats["buybox_wins"] += 1
                 buybox_count += 1
 
-            target = None
-            strategy_name = ""
-
-            # ─── منطق هوشمند (Profit Maximization & Competitor Weighting) ─────
-            
-            # حالت 1: ما برنده هستیم -> طمع برای سود بیشتر
-            if is_winner:
-                strategy_name = "Profit-Max (افزایش)"
-                if alone or not comp_price:
-                    self.log(f"👑 [{item['title'][:20]}] شما تنها فروشنده هستید! صعود به سقف...")
-                    target = max_p
-                else:
-                    # قیمت رو می‌بریم 10 هزار تومن زیر قیمت نفر دوم
-                    target = comp_price - step
-                    if target > max_p:
-                        target = max_p
-                    if target <= current:
-                        target = None # نیازی به تغییر نیست
-            
-            # حالت 2: ما بازنده هستیم -> حمله به بای‌باکس
-            else:
-                strategy_name = "Aggressive (کاهش)"
-                if not winner_info:
-                    target = current # دیتایی از رقیب نیست، کاری نمی‌کنیم
-                else:
-                    w_price = winner_info.get("price", 0)
-                    w_votes = winner_info.get("votes", 0)
-                    my_votes = 460 # می‌تواند در آینده داینامیک شود
-                    
-                    # فرمول غول‌کُش (وزن رقیب سنگین)
-                    if w_votes > 10000 and my_votes < 1000:
-                        drop_amount = int(w_price * 0.012) # 1.2 درصد کاهش
-                        target = w_price - drop_amount
-                        target = (target // 10000) * 10000 
-                        self.log(f"🥊 غلبه بر غول: رقابت با رقیب سنگین‌وزن")
-                    else:
-                        target = w_price - step
+            strategy_name = str(conf.get("strategy", s.get("default_strategy", "adaptive_sniper")))
+            strategy = get_strategy(strategy_name)
+            target = strategy.decide(
+                StrategyInput(
+                    competitor_price=int(comp_price or 0),
+                    current_price=current,
+                    min_price=min_p,
+                    max_price=max_p,
+                    step=step,
+                    is_buy_box_winner=is_winner,
+                    alone_in_market=alone,
+                    winner_info=winner_info,
+                )
+            )
 
             # ─── اعمال گاردها ──────────────────────────────────────────────
             if target is None:
@@ -619,6 +618,14 @@ class DigikalaRepricer:
             )
             
             self.update_my_price(vid, target)
+            winner_seller_id = int((winner_info or {}).get("seller_id") or 0)
+            if winner_seller_id:
+                gap = max(0, int((winner_info or {}).get("price", 0)) - int(target))
+                strategy.memory.record_result(
+                    competitor_seller_id=winner_seller_id,
+                    gap=gap,
+                    won=not is_winner,
+                )
             updated_count += 1
 
         self.log(
