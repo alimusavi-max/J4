@@ -240,7 +240,7 @@ def get_competitors(data: CompetitorPriceModel):
     product_id: شناسه عددی محصول (عدد بعد از dkp-)
     """
     bot        = DigikalaRepricer(data.workspace_id)
-    price, alone = bot.get_competitor_prices(data.product_id, data.my_seller_id)
+    price, alone, winner = bot.get_competitor_prices(data.product_id, data.my_seller_id)
     return {
         "product_id":            data.product_id,
         "lowest_competitor_price": price,

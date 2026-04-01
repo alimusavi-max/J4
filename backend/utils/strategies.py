@@ -1,121 +1,92 @@
 """
 backend/utils/strategies.py
 
-استراتژی‌های قیمت‌گذاری — ساده، واضح، per-variant
-
-هر استراتژی یک تابع decide() دارد:
-  ورودی: StrategyInput
-  خروجی: قیمت پیشنهادی (int) یا None (= هیچ کاری نکن)
+استراتژی قیمت‌گذاری — ساده‌سازی شده به یک استراتژی هوشمند تک‌منظوره
 """
 from dataclasses import dataclass
-from typing import Optional
-
+from typing import Optional, Dict, Any
 
 @dataclass
 class StrategyInput:
-    competitor_price: int    # ارزان‌ترین رقیب (از API عمومی دیجی‌کالا)
+    competitor_price: int    # ارزان‌ترین رقیب
     current_price: int       # قیمت فعلی من
-    min_price: int           # کف مجاز (تنظیم کاربر)
-    max_price: int           # سقف مجاز (تنظیم کاربر)
-    step: int                # گام قیمت این تنوع
+    min_price: int           # کف مجاز
+    max_price: int           # سقف مجاز
+    step: int                # گام قیمت (مثلا 10000)
     is_buy_box_winner: bool  # آیا الان buybox دارم؟
     alone_in_market: bool    # آیا رقیبی نیست؟
+    winner_info: Dict[str, Any] = None # اطلاعات برنده برای تشخیص غول‌ها
 
 
-class AggressiveStrategy:
+class SmartStrategy:
     """
-    تهاجمی:
-    - رقیب دارم  → step زیر رقیب بزن
-    - رقیب نیست  → تا سقف برو
-    - زیر کف هرگز
+    استراتژی هوشمند (تنها استراتژی سیستم):
+    ۱. برنده هستم:
+       - رقیب نیست -> برو به سقف قیمت
+       - رقیب هست -> قیمت را ببر دقیقاً یک گام زیر نفر دوم (بیشینه‌سازی سود)
+    ۲. بازنده هستم:
+       - رقیب غول است (بالای 10هزار رای) -> 1.2 درصد زیر قیمت او
+       - رقیب معمولی است -> یک گام (step) زیر قیمت او
     """
-    name = "aggressive"
-    label = "تهاجمی"
-    description = "همیشه یک گام زیر ارزان‌ترین رقیب. اگر رقیبی نباشد تا سقف می‌رود."
+    name = "smart"
+    label = "هوشمند (Profit & Attack)"
+    description = "به صورت خودکار رقبای قدرتمند را تشخیص داده و در زمان پیروزی، سود را ماکزیمم می‌کند."
 
     def decide(self, d: StrategyInput) -> Optional[int]:
-        if d.alone_in_market or d.competitor_price <= 0:
-            return d.max_price
-
-        target = d.competitor_price - d.step
-        if target < d.min_price:
-            return None  # رقیب خیلی ارزانه، صبر کن
-        return min(target, d.max_price)
-
-
-class ConservativeStrategy:
-    """
-    محافظه‌کار:
-    - فقط اگه رقیب بیشتر از 3 گام ارزون‌تره وارد رقابت بشم
-    - buybox دارم و رقیب نزدیکه → نگه‌دار
-    - تنها در بازار → یک گام بالا (نه یکدفعه تا سقف)
-    """
-    name = "conservative"
-    label = "محافظه‌کار"
-    description = "فقط وقتی رقیب بیش از ۳ گام پایین‌تر است وارد رقابت می‌شود."
-
-    def decide(self, d: StrategyInput) -> Optional[int]:
-        if d.alone_in_market or d.competitor_price <= 0:
-            target = min(d.current_price + d.step, d.max_price)
-            return target if target > d.current_price else None
-
-        gap = d.current_price - d.competitor_price
-        if gap > d.step * 3:
-            target = d.competitor_price - d.step
-            if target < d.min_price:
-                return None
-            return min(target, d.max_price)
-
+        target = None
+        
+        # ─── حالت ۱: من برنده هستم (بیشینه‌سازی سود) ───
         if d.is_buy_box_winner:
-            return None  # buybox دارم و رقیب نزدیکه → نگه‌دار
+            if d.alone_in_market or d.competitor_price <= 0:
+                # تنها هستم، پرواز به سقف
+                target = d.max_price
+            else:
+                # رقیب دارم، قیمت را می‌برم یک پله زیر ارزان‌ترین رقیب
+                target = d.competitor_price - d.step
+                if target > d.max_price:
+                    target = d.max_price
+                if target <= d.current_price:
+                    return None # جایگاهم خوب است، تغییری نیاز نیست
+                    
+            return target
 
-        # buybox ندارم ولی فاصله کمه → یک گام پایین
-        target = d.current_price - d.step
+        # ─── حالت ۲: من بازنده هستم (حمله به بای‌باکس) ───
+        if not d.winner_info:
+             # اطلاعاتی از برنده نداریم، استاندارد حمله می‌کنیم
+             target = d.current_price - d.step
+        else:
+            w_price = d.winner_info.get("price", 0)
+            w_votes = d.winner_info.get("votes", 0)
+            my_votes = 460 # TODO: می‌تواند بعداً از پروفایل شما خوانده شود
+            
+            # تشخیص رقیب غول‌پیکر
+            if w_votes > 10000 and my_votes < 1000:
+                drop_amount = int(w_price * 0.012) # 1.2 درصد کاهش
+                target = w_price - drop_amount
+                target = (target // 10000) * 10000 # رند کردن به ده هزار تومان
+            else:
+                # رقیب معمولی
+                target = w_price - d.step
+                
+        # اعمال گارد ضرر
         if target < d.min_price:
-            return None
-        return target
-
-
-class StepUpStrategy:
-    """
-    سود-محور:
-    - buybox دارم  → هر چرخه یک گام بالا برو (تا سقف)
-    - buybox ندارم → یک گام زیر رقیب
-    """
-    name = "step_up"
-    label = "سود-محور"
-    description = "وقتی بای‌باکس دارد آرام قیمت را بالا می‌برد. وقتی ندارد زیر رقیب می‌رود."
-
-    def decide(self, d: StrategyInput) -> Optional[int]:
-        if d.alone_in_market or d.competitor_price <= 0:
-            target = min(d.current_price + d.step, d.max_price)
-            return target if target > d.current_price else None
-
-        if d.is_buy_box_winner:
-            target = min(d.current_price + d.step, d.max_price)
-            if target >= d.competitor_price:
-                return None  # خطر از دست دادن buybox
-            return target if target > d.current_price else None
-
-        target = d.competitor_price - d.step
-        if target < d.min_price:
-            return None
+            return None # نمی‌ارزد
+            
         return min(target, d.max_price)
-
 
 # ─── رجیستری ──────────────────────────────────────────────────────────────────
+# حالا فقط یک استراتژی داریم
 STRATEGIES: dict = {
-    "aggressive":   AggressiveStrategy(),
-    "conservative": ConservativeStrategy(),
-    "step_up":      StepUpStrategy(),
+    "smart": SmartStrategy(),
+    # برای جلوگیری از کرش کردن فرانت‌اند اگر دیتابیس قدیمی نام استراتژی‌های قبلی را ذخیره کرده باشد:
+    "aggressive": SmartStrategy(),
+    "conservative": SmartStrategy(),
+    "step_up": SmartStrategy(),
 }
 
 STRATEGY_INFO = [
-    {"key": "aggressive",   "label": "تهاجمی",       "desc": AggressiveStrategy.description},
-    {"key": "conservative", "label": "محافظه‌کار",    "desc": ConservativeStrategy.description},
-    {"key": "step_up",      "label": "سود-محور",      "desc": StepUpStrategy.description},
+    {"key": "smart", "label": "هوشمند (Profit & Attack)", "desc": SmartStrategy.description},
 ]
 
-
 def get_strategy(name: str):
-    return STRATEGIES.get(name, STRATEGIES["aggressive"])
+    return STRATEGIES.get(name, STRATEGIES["smart"])

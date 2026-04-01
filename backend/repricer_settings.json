@@ -1,0 +1,17 @@
+{
+    "lead_time": 2,
+    "shipping_type": "seller",
+    "max_per_order": 2,
+    "request_delay_min": 3.0,
+    "request_delay_max": 6.0,
+    "rate_limit_backoff_base": 15,
+    "max_retries": 999,
+    "default_strategy": "aggressive",
+    "default_step": 1000,
+    "dry_run": false,
+    "variant_cooldown_seconds": 300,
+    "notify_webhook_url": "",
+    "rate_limit_pause_seconds": 180,
+    "max_consecutive_failures": 10,
+    "my_seller_id": 0
+}

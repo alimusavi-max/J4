@@ -25,8 +25,6 @@ interface Product {
   max_price: string | number;
   has_config: boolean;
   enabled?: boolean;
-  strategy?: string;
-  step?: number;
 }
 
 interface BotState {
@@ -47,20 +45,12 @@ interface Settings {
   request_delay_max: number;
   rate_limit_backoff_base: number;
   max_retries: number;
-  default_strategy: string;
-  default_step: number;
   dry_run: boolean;
   variant_cooldown_seconds: number;
   notify_webhook_url: string;
   rate_limit_pause_seconds: number;
   max_consecutive_failures: number;
   my_seller_id: number;
-}
-
-interface Strategy {
-  key: string;
-  label: string;
-  desc: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -71,8 +61,6 @@ const DEFAULT_SETTINGS: Settings = {
   request_delay_max: 6.0,
   rate_limit_backoff_base: 15,
   max_retries: 3,
-  default_strategy: "aggressive",
-  default_step: 1000,
   dry_run: false,
   variant_cooldown_seconds: 300,
   notify_webhook_url: "",
@@ -334,15 +322,12 @@ export default function RepricerApp() {
   const [workspaceId, setWorkspaceId] = useState(1);
   const [filter, setFilter] = useState<FilterMode>("all");
   const [search, setSearch] = useState("");
-  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [bulkMin, setBulkMin] = useState("");
   const [bulkMax, setBulkMax] = useState("");
-  const [bulkStrategy, setBulkStrategy] = useState("");
   const [cycleHistory, setCycleHistory] = useState<number[]>([]);
   const logsRef = useRef<HTMLDivElement>(null);
 
@@ -363,7 +348,6 @@ export default function RepricerApp() {
       .then((r) => r.json())
       .then((d) => {
         if (d.settings) setSettings({ ...DEFAULT_SETTINGS, ...d.settings });
-        if (d.strategies) setStrategies(d.strategies);
       })
       .catch(() => {});
   }, []);
@@ -431,8 +415,6 @@ export default function RepricerApp() {
       const merged = (varData.variants || []).map((v: Product) => ({
         ...v,
         enabled: cfgData[String(v.variant_id)]?.enabled !== false,
-        strategy: cfgData[String(v.variant_id)]?.strategy || "aggressive",
-        step: cfgData[String(v.variant_id)]?.step,
         min_price: cfgData[String(v.variant_id)]?.min_price || v.min_price,
         max_price: cfgData[String(v.variant_id)]?.max_price || v.max_price,
       }));
@@ -453,8 +435,7 @@ export default function RepricerApp() {
           ...(p.min_price !== "" && { min_price: parseInt(String(p.min_price)) }),
           ...(p.max_price !== "" && { max_price: parseInt(String(p.max_price)) }),
           enabled: p.enabled !== false,
-          strategy: p.strategy || "aggressive",
-          ...(p.step && { step: p.step }),
+          strategy: "smart", // همیشه استراتژی هوشمند اعمال میشود
         };
       }
     });
@@ -506,11 +487,9 @@ export default function RepricerApp() {
     }
   };
 
-  // ─── Per-variant toggle ────────────────────────────────────────────────────
   const toggleVariantBot = async (variantId: number, enabled: boolean) => {
     setTogglingId(String(variantId));
     try {
-      // Optimistic update
       setProducts((prev) =>
         prev.map((p) =>
           p.variant_id === variantId ? { ...p, enabled } : p
@@ -526,7 +505,6 @@ export default function RepricerApp() {
         enabled ? "success" : "warn"
       );
     } catch {
-      // Revert
       setProducts((prev) =>
         prev.map((p) =>
           p.variant_id === variantId ? { ...p, enabled: !enabled } : p
@@ -537,7 +515,6 @@ export default function RepricerApp() {
     setTogglingId(null);
   };
 
-  // ─── Bulk enable/disable ───────────────────────────────────────────────────
   const bulkToggle = async (enabled: boolean) => {
     if (selectedIds.size === 0) {
       toast("هیچ تنوعی انتخاب نشده", "warn");
@@ -564,7 +541,7 @@ export default function RepricerApp() {
   };
 
   const applyBulkPrices = () => {
-    if (!bulkMin && !bulkMax && !bulkStrategy) {
+    if (!bulkMin && !bulkMax) {
       toast("مقداری وارد کنید", "warn");
       return;
     }
@@ -575,63 +552,12 @@ export default function RepricerApp() {
           ...p,
           ...(bulkMin ? { min_price: parseInt(bulkMin) } : {}),
           ...(bulkMax ? { max_price: parseInt(bulkMax) } : {}),
-          ...(bulkStrategy ? { strategy: bulkStrategy } : {}),
         };
       })
     );
     toast(`${selectedIds.size} تنوع آپدیت شد`, "success");
     setBulkMin("");
     setBulkMax("");
-    setBulkStrategy("");
-  };
-
-  const autoDiscover = async (
-    variant_id: number,
-    reference_price: number,
-    current_price: number
-  ) => {
-    if (
-      !confirm(
-        `کشف خودکار بازه قیمت برای تنوع ${variant_id}؟\nحدود ۶۰-۹۰ ثانیه طول می‌کشد.`
-      )
-    )
-      return;
-    setDiscoveringId(String(variant_id));
-    try {
-      const res = await fetch(`${API}/api/bot/discover_bounds`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          variant_id: String(variant_id),
-          reference_price:
-            parseInt(String(reference_price)) ||
-            parseInt(String(current_price)),
-          current_price: parseInt(String(current_price)),
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setProducts((prev) =>
-          prev.map((p) =>
-            String(p.variant_id) === String(variant_id)
-              ? {
-                  ...p,
-                  min_price: data.min_price,
-                  max_price: data.max_price,
-                  has_config: true,
-                }
-              : p
-          )
-        );
-        toast(`کف: ${fmtNum(data.min_price)} | سقف: ${fmtNum(data.max_price)}`, "success");
-      } else {
-        toast("خطا: " + data.message, "error");
-      }
-    } catch {
-      toast("خطای ارتباط با سرور", "error");
-    }
-    setDiscoveringId(null);
   };
 
   const handlePriceChange = (
@@ -641,12 +567,6 @@ export default function RepricerApp() {
   ) => {
     setProducts((prev) =>
       prev.map((p) => (p.variant_id === id ? { ...p, [field]: value } : p))
-    );
-  };
-
-  const handleStrategyChange = (id: number, strategy: string) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.variant_id === id ? { ...p, strategy } : p))
     );
   };
 
@@ -666,13 +586,13 @@ export default function RepricerApp() {
 
   // ─── Log coloring ──────────────────────────────────────────────────────────
   const logColor = (log: string) => {
-    if (log.includes("✅") || log.includes("موفق")) return "#00ff9d";
-    if (log.includes("❌") || log.includes("خطا")) return "#ff4560";
-    if (log.includes("⚠️")) return "#ffb700";
+    if (log.includes("✅") || log.includes("موفق") || log.includes("👑")) return "#00ff9d";
+    if (log.includes("❌") || log.includes("خطا") || log.includes("🛑")) return "#ff4560";
+    if (log.includes("⚠️") || log.includes("⏳")) return "#ffb700";
     if (log.includes("429")) return "#ff7700";
-    if (log.includes("⚔️") || log.includes("→")) return "#00cfff";
+    if (log.includes("⚔️") || log.includes("→") || log.includes("🎯") || log.includes("🥊")) return "#00cfff";
     if (log.includes("━━")) return "#2a3447";
-    if (log.includes("▶️") || log.includes("⏹")) return "#a78bfa";
+    if (log.includes("▶️") || log.includes("⏹") || log.includes("🚀")) return "#a78bfa";
     return "#4a5568";
   };
 
@@ -683,17 +603,6 @@ export default function RepricerApp() {
     { id: "settings" as ActiveTab, label: "تنظیمات", icon: "◎" },
     { id: "logs" as ActiveTab, label: "لاگ زنده", icon: "▶" },
   ];
-
-  const strategyColor: Record<string, string> = {
-    aggressive: "#ff4560",
-    conservative: "#00cfff",
-    step_up: "#ffb700",
-  };
-  const strategyLabel: Record<string, string> = {
-    aggressive: "تهاجمی",
-    conservative: "محافظه",
-    step_up: "سود-محور",
-  };
 
   return (
     <div
@@ -717,10 +626,6 @@ export default function RepricerApp() {
         select option { background: #0d1117; color: #e2e8f0; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
         @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
-        @keyframes scanline {
-          0% { transform: translateY(-100%); }
-          100% { transform: translateY(100vh); }
-        }
       `}</style>
 
       <ToastContainer toasts={toasts} remove={removeToast} />
@@ -764,7 +669,7 @@ export default function RepricerApp() {
               letterSpacing: "0.1em",
             }}
           >
-            REPRICER v4.0
+            SMART REPRICER
           </div>
         </div>
 
@@ -799,7 +704,7 @@ export default function RepricerApp() {
                   fontFamily: "'IBM Plex Mono', monospace",
                 }}
               >
-                {isRunning ? "در حال اجرا" : "متوقف"}
+                {isRunning ? "هوش مصنوعی فعال" : "سیستم متوقف"}
               </div>
               {isRunning && (
                 <div
@@ -936,7 +841,7 @@ export default function RepricerApp() {
               letterSpacing: "0.05em",
             }}
           >
-            {isRunning ? "■ STOP" : "▶ START"}
+            {isRunning ? "■ STOP" : "▶ START AI"}
           </button>
         </div>
       </aside>
@@ -985,7 +890,7 @@ export default function RepricerApp() {
                 `${products.length} تنوع | ${enabledVariants} فعال | ${disabledVariants} متوقف`}
               {tab === "dashboard" &&
                 `workspace: ${workspaceId} | ${isRunning ? "در حال اجرا" : "متوقف"}`}
-              {tab === "settings" && "پیکربندی ربات"}
+              {tab === "settings" && "پیکربندی هوش مصنوعی"}
               {tab === "logs" && `${logs.length} خط لاگ`}
             </div>
           </div>
@@ -1039,18 +944,12 @@ export default function RepricerApp() {
                   data={cycleHistory}
                 />
                 <MetricCard
-                  label="آپدیت قیمت"
+                  label="تغییرات قیمت"
                   value={botState.total_updates || 0}
-                  sub="این جلسه"
+                  sub="توسط هوش مصنوعی"
                   color="#a78bfa"
                   pulse={isRunning}
                   data={cycleHistory}
-                />
-                <MetricCard
-                  label="خطای 429"
-                  value={botState.rate_limit_hits || 0}
-                  sub="محدودیت نرخ"
-                  color="#ff7700"
                 />
                 <MetricCard
                   label="چرخه‌ها"
@@ -1058,12 +957,6 @@ export default function RepricerApp() {
                   sub={isRunning ? `${uptime} دقیقه آپ‌تایم` : "متوقف"}
                   color={isRunning ? "#00ff9d" : "#2a3447"}
                   pulse={isRunning}
-                />
-                <MetricCard
-                  label="تنوع‌های غیرفعال"
-                  value={disabledVariants}
-                  sub="توقف دستی"
-                  color="#ff4560"
                 />
               </div>
 
@@ -1092,7 +985,7 @@ export default function RepricerApp() {
                       marginBottom: 16,
                     }}
                   >
-                    QUICK ACTIONS
+                    دسترسی سریع
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <button
@@ -1110,7 +1003,7 @@ export default function RepricerApp() {
                         textAlign: "right",
                       }}
                     >
-                      {loading ? "در حال دریافت..." : "↓ دریافت تنوع‌ها از دیجی‌کالا"}
+                      {loading ? "در حال دریافت..." : "↓ همگام‌سازی محصولات با سایت"}
                     </button>
                     <button
                       onClick={() => setTab("products")}
@@ -1126,7 +1019,7 @@ export default function RepricerApp() {
                         textAlign: "right",
                       }}
                     >
-                      ◈ مدیریت تنوع‌ها و کنترل ربات
+                      ◈ ویرایش کف و سقف قیمت‌ها
                     </button>
                     <button
                       onClick={() => setTab("logs")}
@@ -1142,7 +1035,7 @@ export default function RepricerApp() {
                         textAlign: "right",
                       }}
                     >
-                      ▶ مشاهده لاگ‌های زنده
+                      ▶ رصد تصمیم‌گیری‌های ربات
                     </button>
                   </div>
                 </div>
@@ -1225,88 +1118,6 @@ export default function RepricerApp() {
                   </div>
                 </div>
               </div>
-
-              {/* Strategy distribution */}
-              {products.length > 0 && (
-                <div
-                  style={{
-                    background: "#0d1117",
-                    border: "1px solid #1c2333",
-                    borderRadius: 4,
-                    padding: 20,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: "#4a5568",
-                      fontFamily: "'IBM Plex Mono', monospace",
-                      letterSpacing: "0.1em",
-                      marginBottom: 16,
-                    }}
-                  >
-                    توزیع استراتژی
-                  </div>
-                  <div style={{ display: "flex", gap: 24 }}>
-                    {Object.entries(strategyLabel).map(([key, label]) => {
-                      const count = products.filter(
-                        (p) => (p.strategy || "aggressive") === key
-                      ).length;
-                      const pct =
-                        products.length > 0
-                          ? Math.round((count / products.length) * 100)
-                          : 0;
-                      return (
-                        <div key={key} style={{ flex: 1 }}>
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              marginBottom: 6,
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontSize: 11,
-                                color: strategyColor[key],
-                                fontFamily: "'IBM Plex Mono', monospace",
-                              }}
-                            >
-                              {label}
-                            </span>
-                            <span
-                              style={{
-                                fontSize: 11,
-                                color: "#4a5568",
-                                fontFamily: "'IBM Plex Mono', monospace",
-                              }}
-                            >
-                              {count}
-                            </span>
-                          </div>
-                          <div
-                            style={{
-                              height: 3,
-                              background: "#1c2333",
-                              borderRadius: 2,
-                            }}
-                          >
-                            <div
-                              style={{
-                                height: "100%",
-                                width: `${pct}%`,
-                                background: strategyColor[key],
-                                borderRadius: 2,
-                                transition: "width 0.5s ease",
-                              }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
@@ -1416,7 +1227,7 @@ export default function RepricerApp() {
                     fontFamily: "'IBM Plex Mono', monospace",
                   }}
                 >
-                  {saving ? "..." : "↑ ذخیره"}
+                  {saving ? "..." : "↑ ذخیره تغییرات"}
                 </button>
               </div>
 
@@ -1441,7 +1252,7 @@ export default function RepricerApp() {
                       fontFamily: "'IBM Plex Mono', monospace",
                     }}
                   >
-                    {selectedIds.size} انتخاب‌شده
+                    {selectedIds.size} کالا انتخاب‌شده
                   </span>
 
                   <button
@@ -1509,24 +1320,6 @@ export default function RepricerApp() {
                       fontFamily: "'IBM Plex Mono', monospace",
                     }}
                   />
-                  <select
-                    value={bulkStrategy}
-                    onChange={(e) => setBulkStrategy(e.target.value)}
-                    style={{
-                      padding: "5px 8px",
-                      background: "#070c15",
-                      border: "1px solid #1c2333",
-                      borderRadius: 3,
-                      color: "#e2e8f0",
-                      fontSize: 11,
-                      fontFamily: "'IBM Plex Mono', monospace",
-                    }}
-                  >
-                    <option value="">استراتژی...</option>
-                    <option value="aggressive">تهاجمی</option>
-                    <option value="conservative">محافظه‌کار</option>
-                    <option value="step_up">سود-محور</option>
-                  </select>
                   <button
                     onClick={applyBulkPrices}
                     style={{
@@ -1540,7 +1333,7 @@ export default function RepricerApp() {
                       fontFamily: "'IBM Plex Mono', monospace",
                     }}
                   >
-                    اعمال
+                    اعمال دسته‌جمعی
                   </button>
                   <button
                     onClick={() => setSelectedIds(new Set())}
@@ -1593,26 +1386,22 @@ export default function RepricerApp() {
                             onChange={selectAll}
                           />
                         </th>
-                        <th style={thStyle}>ربات</th>
-                        <th style={thStyle}>وضعیت</th>
-                        <th style={thStyle}>کد تنوع</th>
-                        <th style={{ ...thStyle, textAlign: "right", minWidth: 200 }}>
-                          نام محصول
-                        </th>
-                        <th style={thStyle}>قیمت جاری</th>
+                        <th style={thStyle}>کنترل ربات</th>
                         <th style={thStyle}>بای‌باکس</th>
-                        <th style={thStyle}>موجودی</th>
-                        <th style={thStyle}>کف قیمت</th>
-                        <th style={thStyle}>سقف قیمت</th>
-                        <th style={thStyle}>استراتژی</th>
-                        <th style={thStyle}>کشف بازه</th>
+                        <th style={thStyle}>DKPC</th>
+                        <th style={{ ...thStyle, textAlign: "right", minWidth: 200 }}>
+                          نام کالا
+                        </th>
+                        <th style={thStyle}>قیمت شما</th>
+                        <th style={thStyle}>کف قیمت (مجاز)</th>
+                        <th style={thStyle}>سقف قیمت (مجاز)</th>
                       </tr>
                     </thead>
                     <tbody>
                       {filtered.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={12}
+                            colSpan={8}
                             style={{
                               textAlign: "center",
                               padding: 48,
@@ -1622,17 +1411,14 @@ export default function RepricerApp() {
                             }}
                           >
                             {products.length === 0
-                              ? "// ابتدا تنوع‌ها را دریافت کنید"
+                              ? "// دکمه دریافت را بزنید"
                               : "// موردی یافت نشد"}
                           </td>
                         </tr>
                       ) : (
                         filtered.map((p) => {
                           const enabled = p.enabled !== false;
-                          const isDisc = discoveringId === String(p.variant_id);
-                          const isToggling =
-                            togglingId === String(p.variant_id);
-                          const strat = p.strategy || "aggressive";
+                          const isToggling = togglingId === String(p.variant_id);
 
                           return (
                             <tr
@@ -1662,12 +1448,13 @@ export default function RepricerApp() {
                                 />
                               </td>
 
-                              {/* BOT TOGGLE — core feature */}
                               <td style={tdStyle}>
                                 <div
                                   style={{
                                     opacity: isToggling ? 0.5 : 1,
                                     pointerEvents: isToggling ? "none" : "auto",
+                                    display: "flex",
+                                    justifyContent: "center"
                                   }}
                                 >
                                   <VariantBotToggle
@@ -1686,7 +1473,7 @@ export default function RepricerApp() {
                                       fontFamily: "'IBM Plex Mono', monospace",
                                     }}
                                   >
-                                    ◆ WIN
+                                    ◆ برنده
                                   </span>
                                 ) : (
                                   <span
@@ -1696,7 +1483,7 @@ export default function RepricerApp() {
                                       fontFamily: "'IBM Plex Mono', monospace",
                                     }}
                                   >
-                                    ◇ LOSE
+                                    ◇ بازنده
                                   </span>
                                 )}
                               </td>
@@ -1749,34 +1536,9 @@ export default function RepricerApp() {
                               </td>
 
                               <td style={tdStyle}>
-                                <span
-                                  style={{
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    color: "#4a5568",
-                                    fontSize: 11,
-                                  }}
-                                >
-                                  {p.buy_box_price ? fmtNum(p.buy_box_price) : "—"}
-                                </span>
-                              </td>
-
-                              <td style={tdStyle}>
-                                <span
-                                  style={{
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    color: "#4a5568",
-                                    fontSize: 11,
-                                  }}
-                                >
-                                  {fmtNum(p.seller_stock ?? p.stock)}
-                                </span>
-                              </td>
-
-                              <td style={tdStyle}>
                                 <input
                                   type="number"
                                   value={p.min_price}
-                                  disabled={isDisc}
                                   onChange={(e) =>
                                     handlePriceChange(
                                       p.variant_id,
@@ -1784,7 +1546,7 @@ export default function RepricerApp() {
                                       e.target.value
                                     )
                                   }
-                                  placeholder="کف"
+                                  placeholder="تعیین نشده"
                                   style={{
                                     width: 100,
                                     padding: "4px 8px",
@@ -1794,7 +1556,6 @@ export default function RepricerApp() {
                                     color: p.min_price ? "#00ff9d" : "#2a3447",
                                     fontSize: 11,
                                     fontFamily: "'IBM Plex Mono', monospace",
-                                    opacity: isDisc ? 0.4 : 1,
                                   }}
                                 />
                               </td>
@@ -1803,7 +1564,6 @@ export default function RepricerApp() {
                                 <input
                                   type="number"
                                   value={p.max_price}
-                                  disabled={isDisc}
                                   onChange={(e) =>
                                     handlePriceChange(
                                       p.variant_id,
@@ -1811,7 +1571,7 @@ export default function RepricerApp() {
                                       e.target.value
                                     )
                                   }
-                                  placeholder="سقف"
+                                  placeholder="تعیین نشده"
                                   style={{
                                     width: 100,
                                     padding: "4px 8px",
@@ -1821,62 +1581,8 @@ export default function RepricerApp() {
                                     color: p.max_price ? "#ff4560" : "#2a3447",
                                     fontSize: 11,
                                     fontFamily: "'IBM Plex Mono', monospace",
-                                    opacity: isDisc ? 0.4 : 1,
                                   }}
                                 />
-                              </td>
-
-                              <td style={tdStyle}>
-                                <select
-                                  value={strat}
-                                  onChange={(e) =>
-                                    handleStrategyChange(
-                                      p.variant_id,
-                                      e.target.value
-                                    )
-                                  }
-                                  style={{
-                                    padding: "4px 8px",
-                                    background: "#070c15",
-                                    border: `1px solid ${strategyColor[strat]}33`,
-                                    borderRadius: 3,
-                                    color: strategyColor[strat],
-                                    fontSize: 10,
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  <option value="aggressive">تهاجمی</option>
-                                  <option value="conservative">محافظه‌کار</option>
-                                  <option value="step_up">سود-محور</option>
-                                </select>
-                              </td>
-
-                              <td style={tdStyle}>
-                                <button
-                                  onClick={() =>
-                                    autoDiscover(
-                                      p.variant_id,
-                                      p.reference_price,
-                                      p.current_price
-                                    )
-                                  }
-                                  disabled={isDisc || !p.current_price}
-                                  style={{
-                                    padding: "4px 10px",
-                                    background: "#a78bfa11",
-                                    border: "1px solid #a78bfa33",
-                                    borderRadius: 3,
-                                    color: "#a78bfa",
-                                    fontSize: 10,
-                                    cursor: "pointer",
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    opacity: isDisc || !p.current_price ? 0.3 : 1,
-                                    whiteSpace: "nowrap",
-                                  }}
-                                >
-                                  {isDisc ? "⟳ اسکن..." : "⟐ کشف"}
-                                </button>
                               </td>
                             </tr>
                           );
@@ -1911,7 +1617,7 @@ export default function RepricerApp() {
                         fontFamily: "'IBM Plex Mono', monospace",
                       }}
                     >
-                      {selectedIds.size} انتخاب‌شده
+                      {selectedIds.size} کالا انتخاب‌شده
                     </span>
                   )}
                 </div>
@@ -1929,83 +1635,17 @@ export default function RepricerApp() {
                 maxWidth: 700,
               }}
             >
-              {/* Strategy section */}
-              <Section title="استراتژی پیش‌فرض ربات">
-                <div
-                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}
-                >
-                  {[
-                    {
-                      k: "aggressive",
-                      l: "تهاجمی",
-                      d: "یک گام زیر رقیب",
-                      c: "#ff4560",
-                    },
-                    {
-                      k: "conservative",
-                      l: "محافظه‌کار",
-                      d: "فقط اگر فاصله زیاد باشد",
-                      c: "#00cfff",
-                    },
-                    {
-                      k: "step_up",
-                      l: "سود-محور",
-                      d: "آرام قیمت را بالا می‌برد",
-                      c: "#ffb700",
-                    },
-                  ].map((s) => (
-                    <button
-                      key={s.k}
-                      onClick={() =>
-                        setSettings((prev) => ({ ...prev, default_strategy: s.k }))
-                      }
-                      style={{
-                        padding: "12px",
-                        background:
-                          settings.default_strategy === s.k
-                            ? `${s.c}11`
-                            : "#070c15",
-                        border: `1px solid ${
-                          settings.default_strategy === s.k ? `${s.c}44` : "#1c2333"
-                        }`,
-                        borderRadius: 4,
-                        color:
-                          settings.default_strategy === s.k ? s.c : "#4a5568",
-                        textAlign: "right",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-                        {s.l}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 10,
-                          opacity: 0.7,
-                          fontFamily: "'IBM Plex Mono', monospace",
-                        }}
-                      >
-                        {s.d}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </Section>
-
-              {/* Guard rails */}
-              <Section title="تنظیمات اصلی">
+              <Section title="پیکربندی هوش مصنوعی">
                 <div
                   style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}
                 >
                   {[
-                    { k: "default_step", l: "گام پیش‌فرض قیمت (تومان)", step: 500 },
-                    { k: "variant_cooldown_seconds", l: "cooldown هر تنوع (ثانیه)", step: 60 },
-                    { k: "my_seller_id", l: "شناسه فروشنده (برای رقبا)", step: 1 },
-                    { k: "rate_limit_pause_seconds", l: "مکث بعد از 429 (ثانیه)", step: 30 },
-                    { k: "max_consecutive_failures", l: "حداکثر خطای متوالی", step: 1 },
-                    { k: "max_retries", l: "تعداد تلاش مجدد", step: 1 },
-                    { k: "lead_time", l: "مدت تحویل (روز)", step: 1 },
-                    { k: "max_per_order", l: "حداکثر سفارش", step: 1 },
+                    { k: "variant_cooldown_seconds", l: "تأخیر بین بررسی مجدد هر کالا (ثانیه)", step: 60 },
+                    { k: "my_seller_id", l: "شناسه فروشگاه شما", step: 1 },
+                    { k: "rate_limit_pause_seconds", l: "مکث امنیتی دیجی‌کالا (ثانیه)", step: 30 },
+                    { k: "max_retries", l: "تعداد تلاش در صورت قطعی", step: 1 },
+                    { k: "lead_time", l: "مدت آماده‌سازی (روز)", step: 1 },
+                    { k: "max_per_order", l: "حداکثر سفارش هر کاربر", step: 1 },
                   ].map((f) => (
                     <SettingInput
                       key={f.k}
@@ -2020,30 +1660,6 @@ export default function RepricerApp() {
                 </div>
               </Section>
 
-              {/* Timing */}
-              <Section title="تنظیمات شبکه و زمان‌بندی">
-                <div
-                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}
-                >
-                  {[
-                    { k: "request_delay_min", l: "تاخیر کمینه (ثانیه)", step: 0.5 },
-                    { k: "request_delay_max", l: "تاخیر بیشینه (ثانیه)", step: 0.5 },
-                    { k: "rate_limit_backoff_base", l: "پایه backoff", step: 5 },
-                  ].map((f) => (
-                    <SettingInput
-                      key={f.k}
-                      label={f.l}
-                      value={(settings as any)[f.k]}
-                      step={f.step}
-                      onChange={(v) =>
-                        setSettings((prev) => ({ ...prev, [f.k]: v }))
-                      }
-                    />
-                  ))}
-                </div>
-              </Section>
-
-              {/* Misc */}
               <Section title="تنظیمات متفرقه">
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <div>
@@ -2056,7 +1672,7 @@ export default function RepricerApp() {
                         letterSpacing: "0.05em",
                       }}
                     >
-                      نوع ارسال
+                      نوع ارسال به مشتری
                     </div>
                     <select
                       value={settings.shipping_type}
@@ -2065,40 +1681,13 @@ export default function RepricerApp() {
                       }
                       style={selectStyle}
                     >
-                      <option value="seller">فروشنده</option>
-                      <option value="digikala">دیجی‌کالا</option>
+                      <option value="seller">توسط فروشنده</option>
+                      <option value="digikala">انبار دیجی‌کالا</option>
                     </select>
                   </div>
 
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 10,
-                        color: "#4a5568",
-                        fontFamily: "'IBM Plex Mono', monospace",
-                        marginBottom: 6,
-                        letterSpacing: "0.05em",
-                      }}
-                    >
-                      Webhook هشدار (اختیاری)
-                    </div>
-                    <input
-                      type="url"
-                      value={settings.notify_webhook_url}
-                      dir="ltr"
-                      onChange={(e) =>
-                        setSettings((prev) => ({
-                          ...prev,
-                          notify_webhook_url: e.target.value,
-                        }))
-                      }
-                      placeholder="https://hooks.slack.com/..."
-                      style={{ ...inputStyle, width: "100%" }}
-                    />
-                  </div>
-
                   <label
-                    style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}
+                    style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer", marginTop: 12 }}
                   >
                     <div
                       onClick={() =>
@@ -2130,7 +1719,7 @@ export default function RepricerApp() {
                     </div>
                     <div>
                       <div style={{ fontSize: 13, color: "#94a3b8" }}>
-                        حالت آزمایشی (Dry Run)
+                        حالت شبیه‌سازی (Dry Run)
                       </div>
                       <div
                         style={{
@@ -2139,7 +1728,7 @@ export default function RepricerApp() {
                           fontFamily: "'IBM Plex Mono', monospace",
                         }}
                       >
-                        قیمت به دیجی‌کالا ارسال نمی‌شود
+                        در این حالت ربات لاگ می‌اندازد اما قیمتی به سایت ارسال نمی‌کند
                       </div>
                     </div>
                   </label>
@@ -2180,7 +1769,7 @@ export default function RepricerApp() {
                     fontFamily: "'IBM Plex Mono', monospace",
                   }}
                 >
-                  {logs.length} خط
+                  {logs.length} خط عملیات
                 </span>
                 <div style={{ flex: 1 }} />
                 <button
@@ -2196,7 +1785,7 @@ export default function RepricerApp() {
                     fontFamily: "'IBM Plex Mono', monospace",
                   }}
                 >
-                  ⊕ کپی لاگ
+                  ⊕ کپی
                 </button>
                 <button
                   onClick={() =>
@@ -2215,7 +1804,7 @@ export default function RepricerApp() {
                     fontFamily: "'IBM Plex Mono', monospace",
                   }}
                 >
-                  ⊗ پاک کردن
+                  ⊗ پاکسازی
                 </button>
               </div>
 
@@ -2255,7 +1844,7 @@ export default function RepricerApp() {
                       marginRight: 12,
                     }}
                   >
-                    dk-repricer::log — workspace {workspaceId}
+                    AI.Core::ExecutionLog — workspace {workspaceId}
                   </span>
                   {isRunning && (
                     <span
@@ -2290,7 +1879,7 @@ export default function RepricerApp() {
                         fontSize: 12,
                       }}
                     >
-                      $ در انتظار لاگ...
+                      $ در انتظار دریافت لاگ از سرور...
                     </span>
                   ) : (
                     logs.map((log, i) => (

@@ -1,6 +1,14 @@
 {
     "75547308": {
         "min_price": 26000000,
-        "max_price": 26000000
+        "max_price": 26000000,
+        "enabled": false,
+        "strategy": "smart"
+    },
+    "76284348": {
+        "min_price": 12000000,
+        "max_price": 18000000,
+        "enabled": true,
+        "strategy": "smart"
     }
 }
