@@ -1,0 +1,24 @@
+https://api.digikala.com/v2/product/4874481/
+
+
+curl ^"https://api.digikala.com/v2/product/4874481/?_rch=48297507c1fb^" ^
+  -H ^"accept: application/json, text/plain, */*^" ^
+  -H ^"accept-language: en-GB,en-US;q=0.9,en;q=0.8,fa;q=0.7^" ^
+  -b ^"_ym_uid=1746617917673398028; _ym_d=1772828520; ab_test_experiments=^%^5B^%^22229ea1a233356b114984cf9fa2ecd3ff^%^22^%^2C^%^224905b18f64695e6dbfd739d20a4ae2c0^%^22^%^2C^%^22f0fd80107233fa604679779d7e121710^%^22^%^2C^%^2237136fdc21e0b782211ccac8c2d7be63^%^22^%^5D; tracker_glob_new=aKnsVRM; Digikala:User:Token:new=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjozMTk0NzE3Miwic3ViIjozMTk0NzE3MiwiZXhwaXJlX3RpbWUiOjE3NzU1ODI3MDEsImV4cCI6MTc3NTU4MjcwMSwicGF5bG9hZCI6W10sInV1aWQiOiI5MjMwYTEzZi01M2EzLTQwNWEtOWI2Mi1lMTlhODIwNTQxZDIiLCJwYXNzd29yZF92ZXJzaW9uIjozLCJ0eXBlIjoidG9rZW4iLCJzaWQiOiIzNGFiYTczNi1jZTVkLTQ0ZGUtOTBiNi1iZTQ3Y2FmNmFiOGMifQ.qiEJ6VCOB9hKkGG6UG2eZ4aMNb3FX9MBXfiYGPeqHBw; DK_ACCESS_TOKEN=eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJzV1hCbVNCcjZ2cDZXa0VmQ05FMlR0U08zRWxhaEQ3X2hla3UzM3pkQ0JnIn0.eyJleHAiOjE3NzU1ODI2NzgsImlhdCI6MTc3Mjk5MDY3OCwianRpIjoib25ydGFjOmQ4ODhjNDhjLTVmZmQtY2E2OC1kZTAyLWY2ZWRiOTYyMzk5ZiIsImlzcyI6Imh0dHBzOi8vYXV0aC5kaWdpa2FsYS5jb20vcmVhbG1zL2RrLWdyb3VwIiwic3ViIjoiZjo2NmQzYjRhMC03NTUzLTQ2OTgtODFiNC1jYzNlZTYzZTI3YTg6OTIzMGExM2YtNTNhMy00MDVhLTliNjItZTE5YTgyMDU0MWQyIiwidHlwIjoiQmVhcmVyIiwiYXpwIjoiZGlnaWthbGEtd2ViLXB1YmxpYyIsInNpZCI6IjM0YWJhNzM2LWNlNWQtNDRkZS05MGI2LWJlNDdjYWY2YWI4YyIsInNjb3BlIjoib3BlbmlkIHVwOnA6YnNjOnIiLCJ1dWlkIjoiOTIzMGExM2YtNTNhMy00MDVhLTliNjItZTE5YTgyMDU0MWQyIn0.nrl2PYn4E3Ziqtq1HaRTZChAl1zR58gx00hJe4zMJKw6wsLVf2kmdiLr7smb7qM_Y1WMmYvjqN8RfEuWMiKfhY9stRsTzfQg9k6UaK1EpwU0cLQdnX48a-_OKzV8UIlZ0K13Y67vkcBHRDFx7-d8oO8UgqU65zKUf8xqUJuV5aKxhMXeehB12Fy5WEy0eReKrc6iEnzg6170jTorBat3HTuqTbqEwQUVt10y5e83fxlVrLDg2FDp2sGk_HwOC0SzCgiGePrE8VUQeEsHdm_rfPAeDmXgOzTPOHdzxTtebAxq7D28DcoDb9_pWn4QhzQR0JyUjl63S_HOnlZXQ7conQ; Digikala:General:Location=YkRLcE1qa3FLbUM3S3l2YTgvNDlwQT09^%^26elpaWElObHhpL29XaVdVNnNYa0NuNGpHeUw2cUF5cStJUDlQODUzd3JtTFdnbldmNWhSNlB6Y1dWS1lGOTd5MW4xZ2d3RGlESGg1YW93TVRSM3JGcFE9PQ~~; PHPSESSID=hc02q7geese2jum09fa20dt9q6; _sp_ses.13cb=*; tracker_session=axe9vLx; TS01b9d479=0181654207f1b80ec380e42471c07571a5b6916760960ede2b6f9be9dc51e4f2bf30f8f31a1f2770ba90426d3150f6cd4ce9b89e34218c7d3ea2136452c653015ff7bd01ce1d2414aacf64fea356b7577da4b2d448; TS01c77ebf=0102310591394aeb627cd5f7fa8368b40167b206a55433d1ca77034d6203a22eb15c54315380762a69ed5cb7114ad73d7368037d022a6cfa7e2c5055658654819f49723d47; TS01b6ea4d=0181654207718d012e02219baa0257b752c922fa86960ede2b6f9be9dc51e4f2bf30f8f31a1f2770ba90426d3150f6cd4ce9b89e34218c7d3ea2136452c653015ff7bd01ce34e1559ebab54622728a746d502e65010f74bc8affab298fe07b0fe19b976730; _sp_id.13cb=d1000ada-3a5f-446f-801c-32bbf58fd7f3.1772729691.64.1774732046.1774720397.a624bcc1-9a28-4989-ad89-d16e863b4895.c5593a55-3e0d-4eb0-b598-9902c796e200.5443515d-ae9c-42e4-aed5-97ee7770ca97.1774726372214.188^" ^
+  -H ^"origin: https://www.digikala.com^" ^
+  -H ^"priority: u=1, i^" ^
+  -H ^"referer: https://www.digikala.com/^" ^
+  -H ^"sec-ch-ua: ^\^"Chromium^\^";v=^\^"146^\^", ^\^"Not-A.Brand^\^";v=^\^"24^\^", ^\^"Google Chrome^\^";v=^\^"146^\^"^" ^
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^" ^
+  -H ^"sec-fetch-dest: empty^" ^
+  -H ^"sec-fetch-mode: cors^" ^
+  -H ^"sec-fetch-site: same-site^" ^
+  -H ^"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36^" ^
+  -H ^"x-web-client: desktop^" ^
+  -H ^"x-web-client-id: web^" ^
+  -H ^"x-web-optimize-response: 1^"
+
+
+
+  uses dkp

@@ -1,0 +1,28 @@
+{,…}
+variants
+: 
+[{variant_id: 76498821, shipping_type: "seller", seller_lead_time: 2, selling_price: 21700000,…}]
+0
+: 
+{variant_id: 76498821, shipping_type: "seller", seller_lead_time: 2, selling_price: 21700000,…}
+credit_increase_percentage
+: 
+8.1
+maximum_per_order
+: 
+2
+seller_lead_time
+: 
+2
+seller_stock
+: 
+189
+selling_price
+: 
+21700000
+shipping_type
+: 
+"seller"
+variant_id
+: 
+76498821

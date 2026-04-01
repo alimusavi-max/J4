@@ -1,0 +1,15 @@
+curl ^"https://seller.digikala.com/api/v2/variants?page=1^&size=10^&sort=product_variant_id^&order=desc^" ^
+  -H ^"accept: application/json, text/plain, */*^" ^
+  -H ^"accept-language: en-GB,en-US;q=0.9,en;q=0.8,fa;q=0.7^" ^
+  -H ^"captcha-token;^" ^
+  -b ^"tracker_glob_new=3KS0hBz; _ym_uid=1746617917673398028; _ym_d=1772828520; seller_api_access_token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzM4NCJ9.eyJ0b2tlbl9pZCI6MzI0ODUyNTEsInNlbGxlcl9pZCI6MTE4NDEzMCwicGF5bG9hZCI6eyJ1c2VybmFtZSI6Ijk4OTE3MjIyNjg1MCIsInJlZ2lzdGVyX3Bob25lIjoiOTg5MTcyMjI2ODUwIiwiZW1haWwiOiJtb3VzYXZpYWxpMTk5QGdtYWlsLmNvbSIsImJ1c2luZXNzX25hbWUiOiJcdTA2MmZcdTA2MzFcdTA2Y2NcdTA2MjdcdTA2Y2MgXHUwNjIyXHUwNjMxXHUwNjI3XHUwNjQ1IFx1MDY0NVx1MDY0NVx1MDYyYVx1MDYyN1x1MDYzMiIsImZpcnN0X25hbWUiOm51bGwsImxhc3RfbmFtZSI6bnVsbCwiY29tcGFueV9uYW1lIjoiXHUwNjJmXHUwNmNjXHUwNjJjXHUwNmNjXHUwNjJhXHUwNjI3XHUwNjQ0IFx1MDYyYVx1MDYyY1x1MDYyN1x1MDYzMVx1MDYyYSBcdTA2YWZcdTA2NDZcdTA2MjdcdTA2NDhcdTA2NDciLCJ2ZXJpZmllZF9ieV9vdHAiOlsiOTg5MTcyMjI2ODUwIl19LCJleHAiOjE3NzU0MjA2OTl9.-6NZqiDtB96pSCKB7Z87UNVw9wofM0eS44xCz3irN_XL3qlzkDJBre1S0u9vRUzb; _dwid=019cc779-5501-7f0e-a658-7aa10d0e4305; _sentinel_dwid=019cc779-5660-7906-9b3f-9aa1b39c89e6; ab_test_experiments=^%^5B^%^22229ea1a233356b114984cf9fa2ecd3ff^%^22^%^2C^%^224905b18f64695e6dbfd739d20a4ae2c0^%^22^%^2C^%^22f0fd80107233fa604679779d7e121710^%^22^%^2C^%^2237136fdc21e0b782211ccac8c2d7be63^%^22^%^5D; tracker_glob_new=aKnsVRM; PHPSESSID=gum4h3pfasff94em4ufavjqa40; TS018d011a=0102310591eccbe278db605fc7039e55697b284c4cbbef48f989ba5d7ea52322d9d6a6cdaf34d40adfbfd3c1bc20d0fddbca7b9ae37f34a70a621e0086f3ded8f5855f9f6d17a9d6a8e16eab68bf7655d0668235e3; tracker_session=aFefmPE; _sp_ses.13cb=*; TS01b6ea4d=018165420735807fdd1cb59d3e61575c9189601c15960ede2b6f9be9dc51e4f2bf30f8f31a1f2770ba90426d3150f6cd4ce9b89e34218c7d3ea2136452c653015ff7bd01ce34e1559ebab54622728a746d502e6501b88c1a9744d390f7c7f3733198fbec2e2dbcf2257b207156df7766495aa4af8c; _sp_id.13cb=d1000ada-3a5f-446f-801c-32bbf58fd7f3.1772729691.64.1774733285.1774720397.a624bcc1-9a28-4989-ad89-d16e863b4895.c5593a55-3e0d-4eb0-b598-9902c796e200.5443515d-ae9c-42e4-aed5-97ee7770ca97.1774726372214.194^" ^
+  -H ^"priority: u=1, i^" ^
+  -H ^"referer: https://seller.digikala.com/pwa/variant-management?page=1^" ^
+  -H ^"sec-ch-ua: ^\^"Chromium^\^";v=^\^"146^\^", ^\^"Not-A.Brand^\^";v=^\^"24^\^", ^\^"Google Chrome^\^";v=^\^"146^\^"^" ^
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^" ^
+  -H ^"sec-fetch-dest: empty^" ^
+  -H ^"sec-fetch-mode: cors^" ^
+  -H ^"sec-fetch-site: same-origin^" ^
+  -H ^"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36^" ^
+  -H ^"x-web-optimize-response: 1^"
