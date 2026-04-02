@@ -1,7 +1,8 @@
 """
 backend/utils/repricer_engine.py
 
-موتور اصلی ربات قیمت‌گذاری — ارتقا یافته با فرمول هوشمند و بیشینه‌سازی سود
+موتور اصلی ربات قیمت‌گذاری — نسخه ۵.۰
+ادغام: CacheMonitor + BuyBoxScorePredictor + ScenarioEngine
 """
 import requests
 import json
@@ -13,37 +14,47 @@ from pathlib import Path
 from typing import Optional, Callable, Tuple, Dict, Any
 
 from utils.manual_cookie_login import ManualCookieManager
-from utils.strategies import StrategyInput, get_strategy
+from utils.strategies import (
+    StrategyInput, get_strategy,
+    AdaptiveMemory, BuyBoxScorePredictor, ScenarioEngine,
+    DEFAULT_STEP,
+)
+from utils.cache_monitor import CacheMonitor, CacheSnapshot, CacheFlushEvent
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR     = Path(__file__).resolve().parent.parent
 SESSIONS_DIR = BASE_DIR / "panel_sessions"
 SETTINGS_FILE = BASE_DIR / "repricer_settings.json"
 
 DEFAULT_SETTINGS = {
-    "lead_time": 2,
-    "shipping_type": "seller",
-    "max_per_order": 4,
-    "request_delay_min": 3.0,
-    "request_delay_max": 6.0,
-    "rate_limit_backoff_base": 15,
-    "max_retries": 3,
-    "default_strategy": "aggressive",
-    "default_step": 1000,
-    "dry_run": False,
+    "lead_time":                2,
+    "shipping_type":            "seller",
+    "max_per_order":            4,
+    "request_delay_min":        3.0,
+    "request_delay_max":        6.0,
+    "rate_limit_backoff_base":  15,
+    "max_retries":              3,
+    "default_strategy":         "adaptive_sniper",
+    "default_step":             20_000,   # ← تغییر: 1000 → 20000
+    "dry_run":                  False,
     "variant_cooldown_seconds": 300,
-    "notify_webhook_url": "",
+    "notify_webhook_url":       "",
     "rate_limit_pause_seconds": 180,
     "max_consecutive_failures": 10,
+    "my_seller_id":             0,
+    "my_seller_rate":           85.0,
+    "enable_cache_monitor":     True,     # ← جدید
+    "cache_poll_interval":      15,       # ← جدید (ثانیه)
+    "cache_max_wait":           1800,     # ← جدید (ثانیه)
 }
 
 
 class DigikalaSellerClient:
-    """HTTP client با retry/backoff برای Seller API"""
+    """HTTP client با retry/backoff"""
     RETRYABLE = {429, 502, 503, 504}
 
     def __init__(self, session: requests.Session, log: Callable):
         self.session = session
-        self.log = log
+        self.log     = log
 
     def request(self, method: str, url: str, *, json_payload=None,
                 timeout=15, retries=3, backoff_base=4) -> Optional[requests.Response]:
@@ -72,27 +83,36 @@ class DigikalaRepricer:
         self.workspace_id = workspace_id
         self.log_callback = log_callback
         self.stats = {
-            "total_updates": 0,
-            "buybox_wins": 0,
-            "cycles": 0,
-            "last_cycle_time": None,
-            "rate_limit_hits": 0,
-            "failed_updates": 0,
-            "last_error": "",
-            "consecutive_failures": 0,
-            "paused_until": 0.0,
+            "total_updates":       0,
+            "buybox_wins":         0,
+            "cycles":              0,
+            "last_cycle_time":     None,
+            "rate_limit_hits":     0,
+            "failed_updates":      0,
+            "last_error":          "",
+            "consecutive_failures":0,
+            "paused_until":        0.0,
+            "cache_flushes_seen":  0,
         }
         self.last_update_at: dict[str, float] = {}
 
-        # ─── Seller session ──────────────────────────────────────
+        # ─── score predictor و memory ────────────────────────────────────────
+        self.memory    = AdaptiveMemory()
+        self.predictor = BuyBoxScorePredictor(self.memory)
+        self.scenario_engine = ScenarioEngine(self.predictor, self.memory)
+
+        # ─── cache monitor ───────────────────────────────────────────────────
+        self.cache_monitor = CacheMonitor(log_callback=self.log)
+
+        # ─── Seller session ──────────────────────────────────────────────────
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "Origin": "https://seller.digikala.com",
-            "Referer": "https://seller.digikala.com/pwa/variant-management",
-            "x-api-client": "pwa",
+            "User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept":        "application/json, text/plain, */*",
+            "Content-Type":  "application/json",
+            "Origin":        "https://seller.digikala.com",
+            "Referer":       "https://seller.digikala.com/pwa/variant-management",
+            "x-api-client":  "pwa",
         })
         self._load_cookies()
         self._set_csrf_header()
@@ -106,13 +126,13 @@ class DigikalaRepricer:
 
         self.client = DigikalaSellerClient(self.session, self.log)
 
-        # ─── Public session ──────────
+        # ─── Public session ──────────────────────────────────────────────────
         self.public_session = requests.Session()
         self.public_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "x-web-client": "desktop",
-            "x-web-client-id": "web",
+            "User-Agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept":         "application/json, text/plain, */*",
+            "x-web-client":   "desktop",
+            "x-web-client-id":"web",
         })
 
     def log(self, msg: str):
@@ -131,7 +151,7 @@ class DigikalaRepricer:
         return DEFAULT_SETTINGS.copy()
 
     def _load_cookies(self):
-        cm = ManualCookieManager(SESSIONS_DIR)
+        cm     = ManualCookieManager(SESSIONS_DIR)
         status = cm.check_cookie_validity(self.workspace_id)
         if not status["valid"]:
             self.log(f"❌ کوکی workspace {self.workspace_id} یافت نشد.")
@@ -170,9 +190,9 @@ class DigikalaRepricer:
         self.stats["consecutive_failures"] = 0
 
     def _on_failure(self, reason: str):
-        self.stats["failed_updates"] += 1
-        self.stats["consecutive_failures"] += 1
-        self.stats["last_error"] = reason
+        self.stats["failed_updates"]        += 1
+        self.stats["consecutive_failures"]  += 1
+        self.stats["last_error"]             = reason
         s = self._load_settings()
         if self.stats["consecutive_failures"] >= int(s.get("max_consecutive_failures", 10)):
             self._pause(int(s.get("rate_limit_pause_seconds", 180)),
@@ -192,80 +212,77 @@ class DigikalaRepricer:
         ))
 
     # =========================================================================
-    # ─── GET: قیمت و رتبه‌ی رقبا (ارتقا یافته) ────────────────────────────────
+    # GET: رقبا
     # =========================================================================
     def get_competitor_prices(
         self,
-        product_id: int,
+        product_id:   int,
         my_seller_id: int,
         my_variant_id: int,
     ) -> Tuple[Optional[int], bool, Dict[str, Any]]:
-        """
-        برگشت: (ارزان‌ترین_رقیب_همسان, تنها_در_بازار, اطلاعات_برنده)
-        - فقط تنوع‌های هم‌رنگ و هم‌گارانتی بررسی می‌شوند.
-        - فقط تنوع‌های marketable در نظر گرفته می‌شوند.
-        """
         url = f"https://api.digikala.com/v2/product/{product_id}/"
         try:
             resp = self.public_session.get(url, timeout=10)
             if resp.status_code != 200:
-                self.log(f"⚠️ public API status={resp.status_code} برای product {product_id}")
                 return None, False, {}
 
-            data = resp.json()
+            data         = resp.json()
             product_data = data.get("data", {}).get("product", {})
-            
-            variants = product_data.get("variants", [])
+            variants     = product_data.get("variants", [])
+
             my_variant = next((v for v in variants if int(v.get("id", 0)) == int(my_variant_id)), None)
             if not my_variant:
-                self.log(f"⚠️ variant {my_variant_id} داخل product {product_id} پیدا نشد.")
                 return None, False, {}
 
-            my_color_id = (my_variant.get("color") or {}).get("id")
+            my_color_id   = (my_variant.get("color") or {}).get("id")
             my_warranty_id = (my_variant.get("warranty") or {}).get("id")
 
-            def _is_same_variant_family(variant: Dict[str, Any]) -> bool:
-                color_id = (variant.get("color") or {}).get("id")
-                warranty_id = (variant.get("warranty") or {}).get("id")
-                return color_id == my_color_id and warranty_id == my_warranty_id
+            def _same_family(v: Dict) -> bool:
+                return (
+                    (v.get("color") or {}).get("id")    == my_color_id and
+                    (v.get("warranty") or {}).get("id") == my_warranty_id
+                )
 
-            same_family = [v for v in variants if _is_same_variant_family(v)]
-            marketable = [v for v in same_family if v.get("status") == "marketable"]
-            marketable_sorted = sorted(
+            same_family  = [v for v in variants if _same_family(v)]
+            marketable   = [v for v in same_family if v.get("status") == "marketable"]
+            sorted_market = sorted(
                 marketable,
                 key=lambda x: int((x.get("price") or {}).get("selling_price") or 0),
             )
 
             winner_info: Dict[str, Any] = {}
-            if marketable_sorted:
-                winner_variant = marketable_sorted[0]
-                winner_seller = winner_variant.get("seller") or {}
-                statistics = winner_variant.get("statistics") or {}
+            if sorted_market:
+                wv          = sorted_market[0]
+                ws          = wv.get("seller") or {}
+                statistics  = wv.get("statistics") or {}
                 winner_info = {
-                    "seller_id": winner_seller.get("id"),
-                    "price": int((winner_variant.get("price") or {}).get("selling_price") or 0),
-                    "item_votes": int(statistics.get("total_count") or 0),
-                    "variant_id": winner_variant.get("id"),
+                    "seller_id":   ws.get("id"),
+                    "seller_rate": float((ws.get("rating") or {}).get("total_rate") or 0),
+                    "lead_time":   int(wv.get("lead_time") or 2),
+                    "price":       int((wv.get("price") or {}).get("selling_price") or 0),
+                    "item_votes":  int(statistics.get("total_count") or 0),
+                    "variant_id":  wv.get("id"),
                 }
 
-            prices: list[int] = []
-            for v in marketable:
-                seller_id = int((v.get("seller") or {}).get("id") or 0)
-                price = int((v.get("price") or {}).get("selling_price") or 0)
-                if seller_id and seller_id != my_seller_id and price > 0:
-                    prices.append(price)
+            prices = [
+                int((v.get("price") or {}).get("selling_price") or 0)
+                for v in marketable
+                if int((v.get("seller") or {}).get("id") or 0) not in (0, my_seller_id)
+                and int((v.get("price") or {}).get("selling_price") or 0) > 0
+            ]
 
             if not prices:
-                # اگر لیست خالی است، یعنی شما تنها فروشنده موجود هستید
                 return None, True, winner_info
 
-            # برگرداندن قیمت ارزان‌ترین رقیب
             return min(prices), False, winner_info
 
         except Exception as e:
-            self.log(f"❌ خطا در دریافت قیمت رقبا product={product_id}: {e}")
+            self.log(f"❌ get_competitor_prices product={product_id}: {e}")
             return None, False, {}
 
+    # =========================================================================
+    # GET: تنوع‌های من
+    # =========================================================================
     def get_my_variants(self, page: int = 1, size: int = 50) -> dict:
         url = (
             f"https://seller.digikala.com/api/v2/variants"
@@ -276,52 +293,72 @@ class DigikalaRepricer:
             if resp is None:
                 return {"success": False, "variants": [], "total_pages": 1}
             if resp.status_code == 401:
-                self.log("⚠️ کوکی منقضی! نیاز به لاگین مجدد.")
+                self.log("⚠️ کوکی منقضی!")
                 return {"success": False, "variants": [], "total_pages": 1, "auth_error": True}
             if resp.status_code == 429:
                 self.log("⏸ 429 هنگام دریافت تنوع‌ها — ۲۰ ثانیه صبر...")
                 time.sleep(20)
                 return {"success": False, "variants": [], "total_pages": 1}
             if resp.status_code == 200:
-                data = resp.json()
-                items = data.get("data", {}).get("items", [])
+                data        = resp.json()
+                items       = data.get("data", {}).get("items", [])
                 total_pages = data.get("data", {}).get("pager", {}).get("total_pages", 1)
-                variants = []
+                variants    = []
                 for item in items:
                     if item.get("active") and item.get("marketplace_seller_stock", 0) > 0:
                         variants.append({
-                            "variant_id":         item.get("product_variant_id"),
-                            "product_id":         item.get("product_id"),
-                            "title":              item.get("product_title"),
-                            "is_buy_box_winner":  item.get("is_buy_box_winner"),
-                            "current_price":      item.get("price_sale"),
-                            "reference_price":    item.get("price_list"),
-                            "buy_box_price":      item.get("buy_box_price"),
-                            "stock":              item.get("marketplace_seller_stock", 0),
-                            "seller_stock":       item.get("seller_stock", 0),
+                            "variant_id":        item.get("product_variant_id"),
+                            "product_id":        item.get("product_id"),
+                            "title":             item.get("product_title"),
+                            "is_buy_box_winner": item.get("is_buy_box_winner"),
+                            "current_price":     item.get("price_sale"),
+                            "reference_price":   item.get("price_list"),
+                            "buy_box_price":     item.get("buy_box_price"),
+                            "buy_box_score":     item.get("buy_box_score"),  # اگه API داشت
+                            "stock":             item.get("marketplace_seller_stock", 0),
+                            "seller_stock":      item.get("seller_stock", 0),
                         })
                 return {"success": True, "variants": variants, "total_pages": total_pages}
             return {"success": False, "variants": [], "total_pages": 1}
         except Exception as e:
-            self.log(f"❌ خطای شبکه get_my_variants: {e}")
+            self.log(f"❌ get_my_variants: {e}")
             return {"success": False, "variants": [], "total_pages": 1}
 
-    def update_my_price(self, variant_id: str, new_price: int, stock: int = 1, silent: bool = False) -> dict:
+    # =========================================================================
+    # PUT: آپدیت قیمت + راه‌اندازی cache monitor
+    # =========================================================================
+    def update_my_price(
+        self,
+        variant_id:  str,
+        new_price:   int,
+        stock:       int = 1,
+        silent:      bool = False,
+        product_id:  Optional[int] = None,
+        my_seller_id: int = 0,
+    ) -> dict:
         url = "https://seller.digikala.com/api/v2/variants/bulk"
-        s = self._load_settings()
+        s   = self._load_settings()
 
         if bool(s.get("dry_run", False)):
             self.log(f"🧪 [DRY-RUN] تنوع {variant_id} → {new_price:,}")
             return {"success": True, "dry_run": True}
 
-        # پیلود دقیقاً منطبق با ساختار ارسالی دیجی‌کالا در فایل شما
+        # snapshot قبل از ارسال (برای cache monitor)
+        snapshot_before: Optional[CacheSnapshot] = None
+        if product_id and my_seller_id and s.get("enable_cache_monitor", True):
+            snapshot_before = self.cache_monitor.fetch_snapshot(
+                product_id   = product_id,
+                variant_id   = int(variant_id),
+                my_seller_id = my_seller_id,
+            )
+
         payload = {"variants": [{
             "variant_id":        int(variant_id),
             "selling_price":     int(new_price),
             "shipping_type":     s.get("shipping_type", "seller"),
             "seller_lead_time":  int(s.get("lead_time", 2)),
             "maximum_per_order": int(s.get("max_per_order", 4)),
-            "seller_stock":      int(stock)  # اضافه شدن موجودی
+            "seller_stock":      int(stock),
         }]}
 
         max_retries  = int(s.get("max_retries", 3))
@@ -330,13 +367,7 @@ class DigikalaRepricer:
         for attempt in range(max_retries):
             try:
                 self._sleep(s)
-                
-                # رفع ارور 405: استفاده از متد PUT به جای POST
-                resp = self.client.request(
-                    "PUT", url,
-                    json_payload=payload,
-                    timeout=10, retries=1,
-                )
+                resp = self.client.request("PUT", url, json_payload=payload, timeout=10, retries=1)
                 if resp is None:
                     continue
 
@@ -355,25 +386,33 @@ class DigikalaRepricer:
                     return {"success": False, "message": "auth_error"}
 
                 if resp.status_code in (200, 201):
-                    body = resp.json()
-                    if body.get("status") is False:
-                        err = body.get("message", "status=false")
+                    body   = resp.json()
+                    errors = body.get("data", {}).get("errors", [])
+                    if body.get("status") is False or errors:
+                        err = body.get("message") or str(errors)
                         if not silent:
                             self.log(f"⚠️ [{variant_id}] رد شد: {err}")
                         self._on_failure(str(err))
                         return {"success": False, "message": str(err)}
-                    errors = body.get("data", {}).get("errors", [])
-                    if errors:
-                        err = str(errors)
-                        if not silent:
-                            self.log(f"⚠️ [{variant_id}] خطای API: {err}")
-                        self._on_failure(err)
-                        return {"success": False, "message": err}
+
                     if not silent:
-                        self.log(f"✅ [{variant_id}] با موفقیت آپدیت شد ← {new_price:,} تومان")
-                    self.stats["total_updates"] += 1
+                        self.log(f"✅ [{variant_id}] ← {new_price:,} ریال")
+                    self.stats["total_updates"]   += 1
                     self._on_success()
                     self.last_update_at[str(variant_id)] = time.time()
+
+                    # ─── راه‌اندازی cache monitor ────────────────────────────
+                    if snapshot_before and product_id and my_seller_id:
+                        self.cache_monitor.watch(
+                            variant_id      = int(variant_id),
+                            product_id      = product_id,
+                            my_seller_id    = my_seller_id,
+                            snapshot_before = snapshot_before,
+                            on_flush        = lambda ev: self._on_cache_flush(ev, variant_id),
+                            poll_interval   = int(s.get("cache_poll_interval", 15)),
+                            max_wait        = int(s.get("cache_max_wait", 1800)),
+                        )
+
                     return {"success": True}
 
                 try:
@@ -390,7 +429,7 @@ class DigikalaRepricer:
                 if attempt < max_retries - 1:
                     time.sleep(5)
             except requests.ConnectionError:
-                self.log(f"🔌 [{variant_id}] خطای اتصال اینترنت — تلاش {attempt+1}")
+                self.log(f"🔌 [{variant_id}] خطای اتصال — تلاش {attempt+1}")
                 if attempt < max_retries - 1:
                     time.sleep(8)
             except Exception as e:
@@ -401,13 +440,65 @@ class DigikalaRepricer:
                 return {"success": False, "message": str(e)}
 
         return {"success": False, "message": "max retries exceeded"}
-    
+
+    # =========================================================================
+    # Callback: وقتی کش flush شد
+    # =========================================================================
+    def _on_cache_flush(self, event: CacheFlushEvent, variant_id: str) -> None:
+        """
+        بعد از flush کش:
+        1. امتیاز واقعی بعد از تغییر قیمت رو کالیبره کن
+        2. نتیجه (برنده/بازنده) رو به memory ثبت کن
+        """
+        self.stats["cache_flushes_seen"] += 1
+
+        if event.after_score and event.before_score:
+            # کالیبره کردن predictor با داده واقعی
+            self.predictor.calibrate(
+                my_price         = event.after_price,
+                comp_price       = event.before_price,  # تقریب — قیمت رقیب قبل از تغییر
+                observed_score   = event.after_score,
+                my_seller_rate   = 85.0,
+                comp_seller_rate = 82.0,
+            )
+            self.log(
+                f"🎯 [{variant_id}] کالیبراسیون | "
+                f"قیمت {event.after_price:,} → امتیاز {event.after_score:.1f} | "
+                f"برنده: {event.after_winner}"
+            )
+
+        # ثبت نتیجه در حافظه یادگیری
+        gap = max(0, event.before_price - event.after_price)
+        # seller_id ۰ = فلذا برای سلر ناشناس ثبت می‌کنیم
+        self.memory.record_result(
+            competitor_seller_id = 0,
+            gap                  = gap,
+            won                  = event.after_winner,
+            my_score             = event.after_score,
+            comp_score           = None,
+        )
+
+        # ─── بررسی سناریوهای بعد از flush ───────────────────────────────────
+        if event.after_winner:
+            self.log(f"🏆 [{variant_id}] بعد از flush: برنده! امتیاز={event.after_score:.1f}")
+            # اگه امتیاز خیلی بالاست، طمع رو trigger کن در چرخه بعدی
+            if event.after_score and event.after_score >= 95:
+                self.log(f"💰 [{variant_id}] امتیاز {event.after_score:.1f} ≥ 95 → طمع در چرخه بعدی")
+        else:
+            self.log(
+                f"📉 [{variant_id}] بعد از flush: بازنده | "
+                f"امتیاز={event.after_score:.1f} | gap بیشتر لازمه"
+            )
+
+    # =========================================================================
+    # discover_price_bounds
+    # =========================================================================
     def discover_price_bounds(self, variant_id: str, reference_price: int,
                                current_price: int) -> dict:
         if not reference_price or reference_price <= 0:
             reference_price = current_price
 
-        self.log(f"🔍 شروع کشف بازه | تنوع {variant_id} | مرجع: {reference_price:,} | جاری: {current_price:,}")
+        self.log(f"🔍 کشف بازه | تنوع {variant_id} | مرجع: {reference_price:,} | جاری: {current_price:,}")
 
         def test(price: int) -> Optional[bool]:
             if price <= 0:
@@ -421,23 +512,22 @@ class DigikalaRepricer:
                 return True
             msg = res.get("message", "").lower()
             if any(x in msg for x in ["auth", "429", "timeout", "connection", "max retries"]):
-                return None  
-            return False  
+                return None
+            return False
 
         self.log(">> فاز ۱: جستجوی سقف...")
         max_valid = current_price
-        lo, hi = 0.0, 0.80  
+        lo, hi    = 0.0, 0.80
 
         for i in range(12):
-            mid = (lo + hi) / 2
-            price = int(round(reference_price * (1 + mid) / 1000) * 1000)
+            mid   = (lo + hi) / 2
+            price = int(round(reference_price * (1 + mid) / DEFAULT_STEP) * DEFAULT_STEP)
             if price == max_valid:
                 lo = mid
                 continue
             self.log(f"  سقف [{i+1}/12] +{round(mid*100,1)}% → {price:,}")
             result = test(price)
             if result is None:
-                self.log(f"  ⚠️ نتیجه نامعتبر (شبکه/429) — رد می‌شود")
                 continue
             if result:
                 max_valid = price
@@ -448,18 +538,17 @@ class DigikalaRepricer:
 
         self.log(">> فاز ۲: جستجوی کف...")
         min_valid = current_price
-        lo, hi = 0.0, 0.50  
+        lo, hi    = 0.0, 0.50
 
         for i in range(12):
-            mid = (lo + hi) / 2
-            price = int(round(reference_price * (1 - mid) / 1000) * 1000)
+            mid   = (lo + hi) / 2
+            price = int(round(reference_price * (1 - mid) / DEFAULT_STEP) * DEFAULT_STEP)
             if price <= 0 or price == min_valid:
                 hi = mid
                 continue
             self.log(f"  کف [{i+1}/12] -{round(mid*100,1)}% → {price:,}")
             result = test(price)
             if result is None:
-                self.log(f"  ⚠️ نتیجه نامعتبر — رد می‌شود")
                 continue
             if result:
                 min_valid = price
@@ -472,6 +561,9 @@ class DigikalaRepricer:
         self.log(f"🎯 نتیجه: کف={min_valid:,} | سقف={max_valid:,}")
         return {"success": True, "min_price": min_valid, "max_price": max_valid}
 
+    # =========================================================================
+    # Diagnostics
+    # =========================================================================
     def get_auth_diagnostics(self) -> dict:
         csrf = bool(
             self.session.headers.get("x-csrf-token")
@@ -480,8 +572,7 @@ class DigikalaRepricer:
         try:
             resp = self.client.request(
                 "GET",
-                "https://seller.digikala.com/api/v2/variants?page=1&size=1"
-                "&sort=product_variant_id&order=desc",
+                "https://seller.digikala.com/api/v2/variants?page=1&size=1&sort=product_variant_id&order=desc",
                 timeout=12, retries=1,
             )
             read_status = resp.status_code if resp else 0
@@ -495,38 +586,49 @@ class DigikalaRepricer:
             "variants_read_status":      read_status,
             "is_read_auth_ok":           read_status == 200,
             "is_paused":                 self._is_paused(),
+            "cache_monitor": {
+                "active_watches":        self.cache_monitor.get_active_watches(),
+                "avg_flush_time_sec":    self.cache_monitor.get_avg_flush_time(),
+                "total_flushes":         self.stats["cache_flushes_seen"],
+            },
         }
 
     def get_runtime_metrics(self) -> dict:
         return {
-            "workspace_id":   self.workspace_id,
-            "stats":          self.stats,
-            "is_paused":      self._is_paused(),
+            "workspace_id": self.workspace_id,
+            "stats":        self.stats,
+            "is_paused":    self._is_paused(),
+            "cache_monitor_history": self.cache_monitor.get_history(10),
         }
 
     # =========================================================================
-    # ─── Main loop (هوشمند شده) ───────────────────────────────────────────────
+    # Main loop
     # =========================================================================
-    def evaluate_and_act_all(self, product_configs: dict,
-                              global_step: int = 1000,
-                              my_seller_id: int = 0) -> dict:
-        
-        self.stats["cycles"] += 1
-        self.stats["last_cycle_time"] = datetime.now().isoformat()
+    def evaluate_and_act_all(
+        self,
+        product_configs: dict,
+        global_step:     int = DEFAULT_STEP,
+        my_seller_id:    int = 0,
+    ) -> dict:
+
+        self.stats["cycles"]          += 1
+        self.stats["last_cycle_time"]  = datetime.now().isoformat()
 
         if self._is_paused():
             self.log("⏸ این چرخه به دلیل pause ایمنی رد شد.")
             return {"buybox_count": 0, "updated_count": 0, "skipped_count": 0,
                     "rate_limit_hits": self.stats["rate_limit_hits"]}
 
-        s = self._load_settings()
-        cooldown = int(s.get("variant_cooldown_seconds", 300))
-        default_step = int(s.get("default_step", global_step))
+        s            = self._load_settings()
+        cooldown     = int(s.get("variant_cooldown_seconds", 300))
+        default_step = int(s.get("default_step", DEFAULT_STEP))
+        my_seller_rt = float(s.get("my_seller_rate", 85.0))
+        my_lead      = int(s.get("lead_time", 2))
 
         self.log(f"━━━ چرخه #{self.stats['cycles']} ━━━")
 
-        all_variants = []
-        page, total_pages = 1, 1
+        all_variants: list = []
+        page, total_pages  = 1, 1
         while page <= total_pages:
             res = self.get_my_variants(page)
             if not res["success"]:
@@ -560,20 +662,18 @@ class DigikalaRepricer:
                 skipped_count += 1
                 continue
 
-            current = int(item.get("current_price") or 0)
+            current   = int(item.get("current_price") or 0)
             is_winner = bool(item.get("is_buy_box_winner"))
-            product_id = item.get("product_id")
-            step = int(conf.get("step", default_step))
+            product_id = item.get("product_id") or conf.get("product_id")
+            step       = int(conf.get("step", default_step))
 
             if product_id:
                 comp_price, alone, winner_info = self.get_competitor_prices(
-                    int(product_id),
-                    my_seller_id,
-                    int(vid),
+                    int(product_id), my_seller_id, int(vid),
                 )
             else:
                 comp_price, alone, winner_info = None, False, {}
-                self.log(f"⚠️ [{item['title'][:20]}] product_id ندارد — رقبا بررسی نشد")
+                self.log(f"⚠️ [{item['title'][:20]}] product_id ندارد")
 
             time.sleep(0.3)
 
@@ -581,51 +681,62 @@ class DigikalaRepricer:
                 self.stats["buybox_wins"] += 1
                 buybox_count += 1
 
-            strategy_name = str(conf.get("strategy", s.get("default_strategy", "adaptive_sniper")))
-            strategy = get_strategy(strategy_name)
-            target = strategy.decide(
-                StrategyInput(
-                    competitor_price=int(comp_price or 0),
-                    current_price=current,
-                    min_price=min_p,
-                    max_price=max_p,
-                    step=step,
-                    is_buy_box_winner=is_winner,
-                    alone_in_market=alone,
-                    winner_info=winner_info,
-                )
+            # ─── تصمیم با ScenarioEngine ─────────────────────────────────────
+            strategy_input = StrategyInput(
+                competitor_price  = int(comp_price or 0),
+                current_price     = current,
+                min_price         = min_p,
+                max_price         = max_p,
+                step              = step,
+                is_buy_box_winner = is_winner,
+                alone_in_market   = alone,
+                winner_info       = winner_info,
+                my_seller_rate    = my_seller_rt,
+                my_lead_time      = my_lead,
+                buy_box_score     = item.get("buy_box_score"),
             )
 
-            # ─── اعمال گاردها ──────────────────────────────────────────────
-            if target is None:
-                skipped_count += 1
-                continue
+            strategy = get_strategy(str(conf.get("strategy", "adaptive_sniper")))
+            result   = strategy.decide_with_details(strategy_input)
 
-            # گارد ضرر و سقف مجاز
-            target = max(min_p, min(max_p, target))
-            target = int(round(target / 1000) * 1000)
-
-            # گارد کش (Cache Guard) - اگر قیمت هدف با سایت یکی است، منتظر بمان
-            if target == current:
-                self.log(f"⏳ [Cache Guard] قیمت هدف ({target:,}) با قیمت فعلی یکی است. انتظار...")
-                skipped_count += 1
-                continue
-
-            comp_str = f"{comp_price:,}" if comp_price else "—"
             self.log(
-                f"🎯 [{item['title'][:20]}] "
-                f"{current:,} → {target:,} | استراتژی: {strategy_name}"
+                f"🎯 [{item['title'][:22]}] "
+                f"سناریو: {result.scenario} | "
+                f"امتیاز پیش‌بینی: {result.predicted_score:.1f} | "
+                f"{current:,} → {result.target_price:,} | "
+                f"conf={result.confidence:.0%}"
             )
-            
-            self.update_my_price(vid, target)
+
+            if result.scenario in ("no_change", "hold"):
+                skipped_count += 1
+                continue
+
+            target = max(min_p, min(max_p, result.target_price))
+            target = int(round(target / DEFAULT_STEP) * DEFAULT_STEP)
+
+            if target == current:
+                skipped_count += 1
+                continue
+
+            self.update_my_price(
+                variant_id   = vid,
+                new_price    = target,
+                stock        = int(item.get("seller_stock") or item.get("stock") or 1),
+                product_id   = int(product_id) if product_id else None,
+                my_seller_id = my_seller_id,
+            )
+
+            # ثبت در memory
             winner_seller_id = int((winner_info or {}).get("seller_id") or 0)
             if winner_seller_id:
                 gap = max(0, int((winner_info or {}).get("price", 0)) - int(target))
-                strategy.memory.record_result(
-                    competitor_seller_id=winner_seller_id,
-                    gap=gap,
-                    won=not is_winner,
+                self.memory.record_result(
+                    competitor_seller_id = winner_seller_id,
+                    gap                  = gap,
+                    won                  = not is_winner,
+                    my_score             = result.predicted_score,
                 )
+
             updated_count += 1
 
         self.log(

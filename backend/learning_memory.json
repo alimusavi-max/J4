@@ -1,6 +1,34 @@
 {
   "1184130": {
-    "last_gap": 1000,
-    "last_result": "win"
+    "last_gap": 20000,
+    "last_result": "win",
+    "observations": [
+      {
+        "gap": 19000,
+        "won": true,
+        "my_score": 90.34,
+        "comp_score": null
+      },
+      {
+        "gap": 20000,
+        "won": true,
+        "my_score": 90.48,
+        "comp_score": null
+      },
+      {
+        "gap": 20000,
+        "won": true,
+        "my_score": 90.48,
+        "comp_score": null
+      },
+      {
+        "gap": 20000,
+        "won": true,
+        "my_score": 90.48,
+        "comp_score": null
+      }
+    ],
+    "best_gap": 19000,
+    "win_rate": 1.0
   }
 }

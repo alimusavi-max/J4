@@ -1,5 +1,5 @@
 """
-backend/main.py
+backend/main.py  —  نسخه ۵.۰
 """
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +14,9 @@ from utils.formula_engine import (
     test_formula, calculate_min_price,
     PRESET_FORMULAS, FORMULA_VARIABLES_HELP,
 )
-from utils.strategies import STRATEGY_INFO
+from utils.strategies import STRATEGY_INFO, DEFAULT_STEP
 
-app = FastAPI(title="Digikala Repricer API", version="4.0.0")
+app = FastAPI(title="Digikala Repricer API", version="5.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -35,14 +35,18 @@ DEFAULT_SETTINGS = {
     "request_delay_max":        6.0,
     "rate_limit_backoff_base":  15,
     "max_retries":              3,
-    "default_strategy":         "aggressive",
-    "default_step":             1000,
+    "default_strategy":         "adaptive_sniper",
+    "default_step":             20_000,    # ← تغییر: 1000 → 20000
     "dry_run":                  False,
     "variant_cooldown_seconds": 300,
     "notify_webhook_url":       "",
     "rate_limit_pause_seconds": 180,
     "max_consecutive_failures": 10,
     "my_seller_id":             0,
+    "my_seller_rate":           85.0,      # ← جدید
+    "enable_cache_monitor":     True,      # ← جدید
+    "cache_poll_interval":      15,        # ← جدید
+    "cache_max_wait":           1800,      # ← جدید
 }
 
 bot_state = {
@@ -53,9 +57,10 @@ bot_state = {
     "total_updates":   0,
     "buybox_wins":     0,
     "rate_limit_hits": 0,
+    "cache_flushes":   0,
 }
 logs: list = []
-logs_lock = threading.Lock()
+logs_lock  = threading.Lock()
 
 
 def save_log(msg: str):
@@ -95,17 +100,18 @@ def run_bot_loop(workspace_id: int, cycle_delay: int = 120):
             settings = _load_settings()
             result   = bot.evaluate_and_act_all(
                 configs,
-                global_step=int(settings.get("default_step", 1000)),
-                my_seller_id=int(settings.get("my_seller_id", 0)),
+                global_step  = int(settings.get("default_step", DEFAULT_STEP)),
+                my_seller_id = int(settings.get("my_seller_id", 0)),
             )
         except Exception as e:
             save_log(f"❌ خطای پیش‌بینی‌نشده در چرخه: {e}")
             result = {"updated_count": 0, "buybox_count": 0, "rate_limit_hits": 0}
 
-        bot_state["cycle_count"]    += 1
-        bot_state["total_updates"]  += result.get("updated_count", 0)
-        bot_state["buybox_wins"]     = result.get("buybox_count", 0)
-        bot_state["rate_limit_hits"] += result.get("rate_limit_hits", 0)
+        bot_state["cycle_count"]      += 1
+        bot_state["total_updates"]    += result.get("updated_count", 0)
+        bot_state["buybox_wins"]       = result.get("buybox_count", 0)
+        bot_state["rate_limit_hits"]  += result.get("rate_limit_hits", 0)
+        bot_state["cache_flushes"]     = bot.stats.get("cache_flushes_seen", 0)
 
         for _ in range(cycle_delay):
             if not bot_state["is_running"]:
@@ -140,14 +146,18 @@ class SettingsModel(BaseModel):
     request_delay_max:        float = 6.0
     rate_limit_backoff_base:  int   = 15
     max_retries:              int   = 3
-    default_strategy:         str   = "aggressive"
-    default_step:             int   = 1000
+    default_strategy:         str   = "adaptive_sniper"
+    default_step:             int   = 20_000
     dry_run:                  bool  = False
     variant_cooldown_seconds: int   = 300
     notify_webhook_url:       str   = ""
     rate_limit_pause_seconds: int   = 180
     max_consecutive_failures: int   = 10
     my_seller_id:             int   = 0
+    my_seller_rate:           float = 85.0
+    enable_cache_monitor:     bool  = True
+    cache_poll_interval:      int   = 15
+    cache_max_wait:           int   = 1800
 
 class FormulaTestModel(BaseModel):
     formula:       str
@@ -157,28 +167,28 @@ class FormulaTestModel(BaseModel):
 class ApplyMinFormulaModel(BaseModel):
     workspace_id: int = 1
     formula:      str
-    step_price:   int = 1000
+    step_price:   int = DEFAULT_STEP
 
 class VariantConfigModel(BaseModel):
-    """Config برای یک تنوع خاص"""
     variant_id: str
     min_price:  Optional[int] = None
     max_price:  Optional[int] = None
     enabled:    bool = True
-    strategy:   str  = "aggressive"
+    strategy:   str  = "adaptive_sniper"
     step:       Optional[int] = None
-    product_id: Optional[int] = None   # برای API عمومی دیجی‌کالا
+    product_id: Optional[int] = None
 
 class CompetitorPriceModel(BaseModel):
-    product_id:    int
-    my_seller_id:  int = 0
-    workspace_id:  int = 1
+    product_id:   int
+    my_seller_id: int = 0
+    workspace_id: int = 1
+    variant_id:   int = 0
 
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "4.0.0", "bot": bot_state}
+    return {"status": "ok", "version": "5.0.0", "bot": bot_state}
 
 @app.get("/api/health/readiness")
 def readiness(workspace_id: int = 1):
@@ -200,6 +210,27 @@ def metrics(workspace_id: int = 1):
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
     return {"status": "ok", "metrics": bot.get_runtime_metrics()}
 
+# ─── Cache Monitor endpoints ──────────────────────────────────────────────────
+@app.get("/api/cache_monitor/history")
+def cache_monitor_history(workspace_id: int = 1, limit: int = 50):
+    """تاریخچه flush های کش دیجی‌کالا"""
+    bot = DigikalaRepricer(workspace_id, log_callback=save_log)
+    return {
+        "status":  "ok",
+        "history": bot.cache_monitor.get_history(limit),
+        "avg_flush_time_sec": bot.cache_monitor.get_avg_flush_time(),
+        "active_watches":     bot.cache_monitor.get_active_watches(),
+    }
+
+@app.get("/api/cache_monitor/active")
+def cache_monitor_active(workspace_id: int = 1):
+    """تنوع‌هایی که الان در حال پایش هستن"""
+    bot = DigikalaRepricer(workspace_id, log_callback=save_log)
+    return {
+        "status":         "ok",
+        "active_watches": bot.cache_monitor.get_active_watches(),
+    }
+
 
 # ─── Products ─────────────────────────────────────────────────────────────────
 @app.get("/api/products")
@@ -219,7 +250,7 @@ def get_products(workspace_id: int = 1):
             item["min_price"]  = conf.get("min_price", "")
             item["max_price"]  = conf.get("max_price", "")
             item["enabled"]    = conf.get("enabled", True)
-            item["strategy"]   = conf.get("strategy", "aggressive")
+            item["strategy"]   = conf.get("strategy", "adaptive_sniper")
             item["step"]       = conf.get("step", None)
             item["has_config"] = vid in saved_configs
             all_variants.append(item)
@@ -232,19 +263,18 @@ def get_products(workspace_id: int = 1):
     }
 
 
-# ─── Competitors (از API عمومی) ───────────────────────────────────────────────
+# ─── Competitors ──────────────────────────────────────────────────────────────
 @app.post("/api/competitors")
 def get_competitors(data: CompetitorPriceModel):
-    """
-    دریافت قیمت رقبا از API عمومی دیجی‌کالا.
-    product_id: شناسه عددی محصول (عدد بعد از dkp-)
-    """
-    bot        = DigikalaRepricer(data.workspace_id)
-    price, alone, winner = bot.get_competitor_prices(data.product_id, data.my_seller_id)
+    bot  = DigikalaRepricer(data.workspace_id)
+    price, alone, winner = bot.get_competitor_prices(
+        data.product_id, data.my_seller_id, data.variant_id
+    )
     return {
-        "product_id":            data.product_id,
+        "product_id":              data.product_id,
         "lowest_competitor_price": price,
-        "alone_in_market":       alone,
+        "alone_in_market":         alone,
+        "winner_info":             winner,
     }
 
 
@@ -261,34 +291,23 @@ def get_config():
 
 @app.put("/api/config/{variant_id}")
 def update_variant_config(variant_id: str, data: VariantConfigModel):
-    """
-    آپدیت config یک تنوع خاص.
-    فقط فیلدهای ارسال‌شده آپدیت می‌شوند.
-    """
-    configs = _load_config()
+    configs  = _load_config()
     existing = configs.get(variant_id, {})
-
-    updated = {**existing}
-    if data.min_price is not None:
-        updated["min_price"] = data.min_price
-    if data.max_price is not None:
-        updated["max_price"] = data.max_price
+    updated  = {**existing}
+    if data.min_price  is not None: updated["min_price"]  = data.min_price
+    if data.max_price  is not None: updated["max_price"]  = data.max_price
     updated["enabled"]  = data.enabled
     updated["strategy"] = data.strategy
-    if data.step is not None:
-        updated["step"] = data.step
-    if data.product_id is not None:
-        updated["product_id"] = data.product_id
+    if data.step       is not None: updated["step"]       = data.step
+    if data.product_id is not None: updated["product_id"] = data.product_id
 
     configs[variant_id] = updated
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(configs, f, ensure_ascii=False, indent=4)
-
     return {"status": "success", "variant_id": variant_id, "config": updated}
 
 @app.patch("/api/config/{variant_id}/toggle")
 def toggle_variant(variant_id: str, enabled: bool):
-    """روشن/خاموش کردن ربات برای یک تنوع خاص"""
     configs = _load_config()
     if variant_id not in configs:
         raise HTTPException(404, f"تنوع {variant_id} در config نیست")
@@ -299,10 +318,9 @@ def toggle_variant(variant_id: str, enabled: bool):
 
 @app.patch("/api/config/{variant_id}/strategy")
 def set_variant_strategy(variant_id: str, strategy: str):
-    """تغییر استراتژی یک تنوع خاص"""
     valid = [s["key"] for s in STRATEGY_INFO]
     if strategy not in valid:
-        raise HTTPException(400, f"استراتژی نامعتبر. مقادیر مجاز: {valid}")
+        raise HTTPException(400, f"استراتژی نامعتبر. مجاز: {valid}")
     configs = _load_config()
     if variant_id not in configs:
         raise HTTPException(404, f"تنوع {variant_id} در config نیست")
@@ -316,10 +334,10 @@ def set_variant_strategy(variant_id: str, strategy: str):
 @app.get("/api/settings")
 def get_settings():
     return {
-        "settings":       _load_settings(),
-        "strategies":     STRATEGY_INFO,
-        "presets":        PRESET_FORMULAS,
-        "variable_help":  FORMULA_VARIABLES_HELP,
+        "settings":      _load_settings(),
+        "strategies":    STRATEGY_INFO,
+        "presets":       PRESET_FORMULAS,
+        "variable_help": FORMULA_VARIABLES_HELP,
     }
 
 @app.post("/api/settings")
@@ -330,10 +348,12 @@ def save_settings(data: SettingsModel):
         raise HTTPException(400, "backoff نباید کمتر از ۵ ثانیه باشد")
     if data.variant_cooldown_seconds < 0:
         raise HTTPException(400, "cooldown نباید منفی باشد")
-    if data.default_step < 100:
-        raise HTTPException(400, "گام نباید کمتر از ۱۰۰ تومان باشد")
+    if data.default_step < 1000:
+        raise HTTPException(400, "گام نباید کمتر از ۱,۰۰۰ ریال باشد")
     if data.rate_limit_pause_seconds < 30:
         raise HTTPException(400, "rate_limit_pause باید حداقل ۳۰ ثانیه باشد")
+    if data.cache_poll_interval < 5:
+        raise HTTPException(400, "cache_poll_interval باید حداقل ۵ ثانیه باشد")
 
     settings = data.model_dump()
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -346,9 +366,9 @@ def save_settings(data: SettingsModel):
 def formula_test(data: FormulaTestModel):
     defaults = {
         "competitor_price": 100000, "reference_price": 150000,
-        "current_price": 100000,    "step_price": 1000,
-        "min_price": 70000,         "cost": 60000,
-        "buy_box_price": 95000,
+        "current_price":    100000, "step_price":      DEFAULT_STEP,
+        "min_price":        70000,  "cost":            60000,
+        "buy_box_price":    95000,
     }
     sample = {**defaults, **data.sample_values}
     return test_formula(data.formula, sample)
@@ -377,8 +397,8 @@ def apply_min_formula(data: ApplyMinFormulaModel):
         ref = int(item.get("reference_price") or item.get("current_price") or 0)
         cur = int(item.get("current_price") or 0)
         try:
-            min_p = calculate_min_price(data.formula, ref, cur, data.step_price)
-            updated[vid] = {**configs.get(vid, {}), "min_price": min_p}
+            min_p          = calculate_min_price(data.formula, ref, cur, data.step_price)
+            updated[vid]   = {**configs.get(vid, {}), "min_price": min_p}
         except ValueError as e:
             errors[vid] = str(e)
 
@@ -408,14 +428,15 @@ def start_bot(data: BotStartModel, background_tasks: BackgroundTasks):
         "cycle_count":     0,
         "total_updates":   0,
         "rate_limit_hits": 0,
+        "cache_flushes":   0,
     })
     background_tasks.add_task(run_bot_loop, data.workspace_id, data.cycle_delay)
     settings = _load_settings()
     save_log(
         f"▶️ ربات روشن شد | workspace={data.workspace_id} | "
         f"تاخیر={data.cycle_delay}s | "
-        f"استراتژی پیش‌فرض={settings.get('default_strategy','aggressive')} | "
-        f"گام پیش‌فرض={settings.get('default_step',1000):,}"
+        f"گام={settings.get('default_step', DEFAULT_STEP):,} | "
+        f"cache_monitor={'on' if settings.get('enable_cache_monitor') else 'off'}"
     )
     return {"status": "running", "state": bot_state}
 
@@ -434,9 +455,7 @@ def test_price(data: TestPriceModel):
 def discover_bounds(data: DiscoverModel):
     bot = DigikalaRepricer(data.workspace_id, log_callback=save_log)
     return bot.discover_price_bounds(
-        str(data.variant_id),
-        data.reference_price,
-        data.current_price,
+        str(data.variant_id), data.reference_price, data.current_price,
     )
 
 
