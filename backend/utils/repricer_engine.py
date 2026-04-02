@@ -447,16 +447,18 @@ class DigikalaRepricer:
     def _on_cache_flush(self, event: CacheFlushEvent, variant_id: str) -> None:
         """
         بعد از flush کش:
-        1. امتیاز واقعی بعد از تغییر قیمت رو کالیبره کن
-        2. نتیجه (برنده/بازنده) رو به memory ثبت کن
+        1. امتیاز واقعی رو کالیبره کن
+        2. نتیجه رو به memory ثبت کن
+        3. اگه بعد از greed بای‌باکس از دست رفت → ceiling cache رو invalidate کن
         """
+        from utils.strategies import _ceiling_cache
+
         self.stats["cache_flushes_seen"] += 1
 
         if event.after_score and event.before_score:
-            # کالیبره کردن predictor با داده واقعی
             self.predictor.calibrate(
                 my_price         = event.after_price,
-                comp_price       = event.before_price,  # تقریب — قیمت رقیب قبل از تغییر
+                comp_price       = event.before_price,
                 observed_score   = event.after_score,
                 my_seller_rate   = 85.0,
                 comp_seller_rate = 82.0,
@@ -467,9 +469,7 @@ class DigikalaRepricer:
                 f"برنده: {event.after_winner}"
             )
 
-        # ثبت نتیجه در حافظه یادگیری
         gap = max(0, event.before_price - event.after_price)
-        # seller_id ۰ = فلذا برای سلر ناشناس ثبت می‌کنیم
         self.memory.record_result(
             competitor_seller_id = 0,
             gap                  = gap,
@@ -478,17 +478,23 @@ class DigikalaRepricer:
             comp_score           = None,
         )
 
-        # ─── بررسی سناریوهای بعد از flush ───────────────────────────────────
         if event.after_winner:
-            self.log(f"🏆 [{variant_id}] بعد از flush: برنده! امتیاز={event.after_score:.1f}")
-            # اگه امتیاز خیلی بالاست، طمع رو trigger کن در چرخه بعدی
+            self.log(f"🏆 [{variant_id}] بعد از flush: برنده! امتیاز={event.after_score or 0:.1f}")
             if event.after_score and event.after_score >= 95:
                 self.log(f"💰 [{variant_id}] امتیاز {event.after_score:.1f} ≥ 95 → طمع در چرخه بعدی")
         else:
             self.log(
                 f"📉 [{variant_id}] بعد از flush: بازنده | "
-                f"امتیاز={event.after_score:.1f} | gap بیشتر لازمه"
+                f"امتیاز={event.after_score or 0:.1f}"
             )
+            # اگه قیمت بعد از flush بالاتر از قبلشه (یعنی greed اتفاق افتاده)
+            # و بای‌باکس رو از دست دادیم → سقف کش رو invalidate کن
+            if event.after_price > event.before_price:
+                _ceiling_cache.invalidate(variant_id)
+                self.log(
+                    f"🔄 [{variant_id}] ceiling cache invalidate شد — "
+                    f"قیمت {event.after_price:,} رد سقف بود"
+                )
 
     # =========================================================================
     # discover_price_bounds
@@ -625,6 +631,20 @@ class DigikalaRepricer:
         my_seller_rt = float(s.get("my_seller_rate", 85.0))
         my_lead      = int(s.get("lead_time", 2))
 
+        # ─── وصل کردن price_probe_fn به ScenarioEngine ───────────────────────
+        # این تابع توسط ScenarioEngine برای کشف سقف واقعی سایت استفاده میشه
+        def _probe_price(vid: str, price: int) -> bool:
+            """تست ارسال یه قیمت خاص — True=قبول شد، False=رد شد"""
+            res = self.update_my_price(
+                variant_id = vid,
+                new_price  = price,
+                stock      = 1,
+                silent     = True,
+            )
+            return res.get("success", False)
+
+        self.scenario_engine.price_probe_fn = _probe_price
+
         self.log(f"━━━ چرخه #{self.stats['cycles']} ━━━")
 
         all_variants: list = []
@@ -694,6 +714,8 @@ class DigikalaRepricer:
                 my_seller_rate    = my_seller_rt,
                 my_lead_time      = my_lead,
                 buy_box_score     = item.get("buy_box_score"),
+                reference_price   = int(item.get("reference_price") or 0),
+                variant_id        = vid,
             )
 
             strategy = get_strategy(str(conf.get("strategy", "adaptive_sniper")))

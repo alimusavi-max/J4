@@ -14,7 +14,7 @@ from utils.formula_engine import (
     test_formula, calculate_min_price,
     PRESET_FORMULAS, FORMULA_VARIABLES_HELP,
 )
-from utils.strategies import STRATEGY_INFO, DEFAULT_STEP
+from utils.strategies import STRATEGY_INFO, DEFAULT_STEP, CEILING_CACHE_FILE
 
 app = FastAPI(title="Digikala Repricer API", version="5.0.0")
 app.add_middleware(
@@ -213,7 +213,6 @@ def metrics(workspace_id: int = 1):
 # ─── Cache Monitor endpoints ──────────────────────────────────────────────────
 @app.get("/api/cache_monitor/history")
 def cache_monitor_history(workspace_id: int = 1, limit: int = 50):
-    """تاریخچه flush های کش دیجی‌کالا"""
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
     return {
         "status":  "ok",
@@ -224,12 +223,33 @@ def cache_monitor_history(workspace_id: int = 1, limit: int = 50):
 
 @app.get("/api/cache_monitor/active")
 def cache_monitor_active(workspace_id: int = 1):
-    """تنوع‌هایی که الان در حال پایش هستن"""
     bot = DigikalaRepricer(workspace_id, log_callback=save_log)
     return {
         "status":         "ok",
         "active_watches": bot.cache_monitor.get_active_watches(),
     }
+
+# ─── Price Ceiling endpoints ───────────────────────────────────────────────────
+@app.get("/api/price_ceiling")
+def get_price_ceilings():
+    """مشاهده سقف‌های کشف‌شده برای همه تنوع‌ها"""
+    from utils.strategies import _ceiling_cache
+    return {"status": "ok", "ceilings": _ceiling_cache.get_all()}
+
+@app.delete("/api/price_ceiling/{variant_id}")
+def invalidate_price_ceiling(variant_id: str):
+    """invalidate کردن سقف کش‌شده یه تنوع (جهت probe مجدد)"""
+    from utils.strategies import _ceiling_cache
+    _ceiling_cache.invalidate(variant_id)
+    return {"status": "ok", "invalidated": variant_id}
+
+@app.delete("/api/price_ceiling")
+def invalidate_all_price_ceilings():
+    """invalidate کردن همه سقف‌های کش‌شده"""
+    from utils.strategies import _ceiling_cache, CEILING_CACHE_FILE
+    if CEILING_CACHE_FILE.exists():
+        CEILING_CACHE_FILE.unlink()
+    return {"status": "ok", "message": "همه سقف‌ها پاک شدند"}
 
 
 # ─── Products ─────────────────────────────────────────────────────────────────

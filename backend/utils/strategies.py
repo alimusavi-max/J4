@@ -2,17 +2,20 @@
 backend/utils/strategies.py
 
 BuyBox Score Engine — پیش‌بینی امتیاز بای‌باکس + سناریوهای هوشمند
+نسخه ۵.۱ — Greed Loop + Price Ceiling Prober
 """
 from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 LEARNING_MEMORY_FILE = BASE_DIR / "learning_memory.json"
+CEILING_CACHE_FILE   = BASE_DIR / "price_ceiling_cache.json"
 
 # ─── ثابت‌های امتیازدهی (از تحلیل CSV لاگ استخراج شده) ──────────────────────
 # رنک بای‌باکس = امتیاز ۰ تا ۱۰۰ (هرچه بالاتر = برنده‌تر)
@@ -25,12 +28,17 @@ W_SELLER = 0.20   # امتیاز فروشنده
 W_LEAD   = 0.08   # زمان ارسال
 
 # آستانه‌های سناریو
-GREED_THRESHOLD      = 95.0   # اگه امتیاز > 95، حریصانه قیمت رو بالا ببر
-SAFE_ZONE_MIN        = 85.0   # اگه امتیاز > 85، در منطقه امن هستی
+GREED_THRESHOLD      = 88.0   # اگه امتیاز > 88 و برنده هستیم → طمع
+SAFE_ZONE_MIN        = 80.0   # اگه امتیاز > 80 → منطقه امن
 WIN_THRESHOLD        = 80.0   # معمولاً بالای ۸۰ بای‌باکس گرفته میشه
 RETREAT_THRESHOLD    = 60.0   # زیر ۶۰ = باید عقب بکشی
-GREED_STEP           = 20_000  # گام بالا بردن قیمت در حالت طمع
-DEFAULT_STEP         = 20_000  # گام پیش‌فرض (تغییر از 1000 به 20000)
+DEFAULT_STEP         = 20_000  # گام پیش‌فرض ریال
+
+# ─── ثابت‌های Price Ceiling Prober ───────────────────────────────────────────
+# دیجی‌کالا معمولاً اجازه نمیده قیمت از قیمت مرجع (price_list) بالاتر بره
+# ولی گاهی تا ۱۰٪ بالاتر هم اجازه میده — باید probe کنیم
+CEILING_CACHE_TTL_SEC  = 3600   # سقف کشف‌شده تا ۱ ساعت معتبره
+CEILING_PROBE_MAX_ITER = 10     # حداکثر تعداد تست برای binary search سقف
 
 
 # ─── مدل داده ─────────────────────────────────────────────────────────────────
@@ -48,6 +56,8 @@ class StrategyInput:
     my_seller_votes:   int   = 0
     my_lead_time:      int   = 2
     buy_box_score:     Optional[float] = None   # امتیاز واقعی از API (اگه موجود)
+    reference_price:   int   = 0                # قیمت مرجع سایت — برای سقف‌یابی
+    variant_id:        str   = "0"              # شناسه تنوع — برای کش سقف
 
 
 @dataclass
@@ -297,106 +307,341 @@ class BuyBoxScorePredictor:
         self._price_sensitivity = max(1/5_000_000, min(1/100_000, self._price_sensitivity))
 
 
+# ─── Price Ceiling Cache ──────────────────────────────────────────────────────
+class PriceCeilingCache:
+    """
+    کش سقف مجاز قیمت دیجی‌کالا per-variant.
+
+    دیجی‌کالا اجازه نمیده قیمت از یه سقف مشخص بالاتر بره (معمولاً نزدیک
+    به price_list/قیمت مرجع). این سقف رو با probe کردن واقعی پیدا می‌کنیم
+    و اینجا کش می‌کنیم تا ۱ ساعت.
+
+    ساختار فایل:
+    {
+      "76498821": {
+        "ceiling": 21900000,
+        "reference_price": 21916500,
+        "probed_at": 1234567890.0,
+        "probe_count": 5,
+        "last_rejected": 22000000
+      }
+    }
+    """
+
+    def __init__(self, path: Path = CEILING_CACHE_FILE):
+        self.path   = path
+        self._cache: Dict[str, Dict] = {}
+        self._loaded = False
+
+    def _load(self):
+        if self._loaded:
+            return
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
+            except Exception:
+                self._cache = {}
+        self._loaded = True
+
+    def _save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", encoding="utf-8") as f:
+            json.dump(self._cache, f, ensure_ascii=False, indent=2)
+
+    def get(self, variant_id: str) -> Optional[int]:
+        """برگرداندن سقف کش‌شده اگه هنوز معتبره"""
+        self._load()
+        entry = self._cache.get(str(variant_id))
+        if not entry:
+            return None
+        age = time.time() - entry.get("probed_at", 0)
+        if age > CEILING_CACHE_TTL_SEC:
+            return None
+        return entry.get("ceiling")
+
+    def set(
+        self,
+        variant_id:      str,
+        ceiling:         int,
+        reference_price: int,
+        last_rejected:   Optional[int] = None,
+    ):
+        self._load()
+        existing = self._cache.get(str(variant_id), {})
+        self._cache[str(variant_id)] = {
+            "ceiling":         ceiling,
+            "reference_price": reference_price,
+            "probed_at":       time.time(),
+            "probe_count":     existing.get("probe_count", 0) + 1,
+            "last_rejected":   last_rejected or ceiling + DEFAULT_STEP,
+        }
+        self._save()
+
+    def invalidate(self, variant_id: str):
+        self._load()
+        self._cache.pop(str(variant_id), None)
+        self._save()
+
+    def get_all(self) -> Dict:
+        self._load()
+        return dict(self._cache)
+
+
+_ceiling_cache = PriceCeilingCache()
+
+
 # ─── موتور سناریو ─────────────────────────────────────────────────────────────
 class ScenarioEngine:
     """
-    تصمیم‌گیری بر اساس سناریوهای تعریف‌شده + پیش‌بینی امتیاز.
+    تصمیم‌گیری بر اساس سناریوهای هوشمند.
+
+    سناریوها (به ترتیب اولویت):
+    1. alone        — تنها فروشنده → probe سقف سایت → بهترین قیمت مجاز
+    2. greed        — برنده + امتیاز بالا → افزایش قیمت با بررسی سقف سایت
+    3. retreat_up   — رقیب کشید عقب → ما هم بالا میریم تا سقف مجاز
+    4. hold         — برنده + منطقه امن → نگه می‌داریم
+    5. win          — بازنده → محاسبه قیمت برنده با حافظه + مدل
     """
 
     def __init__(self, predictor: BuyBoxScorePredictor, memory: AdaptiveMemory):
         self.predictor = predictor
         self.memory    = memory
+        self.ceiling   = _ceiling_cache
+        # callback برای probe واقعی قیمت — توسط repricer_engine تنظیم میشه
+        # امضا: (variant_id: str, price: int) -> bool (True=قبول شد، False=رد شد)
+        self.price_probe_fn: Optional[Callable[[str, int], bool]] = None
+
+    def _effective_ceiling(
+        self,
+        variant_id:      str,
+        reference_price: int,
+        current_price:   int,
+        max_price:       int,
+    ) -> int:
+        """
+        سقف مؤثر = min(max_price_کاربر, سقف_واقعی_سایت).
+
+        اگه سقف از کش موجوده برمیگردونیم.
+        وگرنه یه تخمین محافظه‌کارانه میدیم:
+          - معمولاً دیجی‌کالا تا ~۱۰۵٪ قیمت مرجع قبول می‌کنه
+          - اما probe واقعی توسط GreedProber انجام میشه
+        """
+        cached = self.ceiling.get(variant_id)
+        if cached:
+            return min(max_price, cached)
+
+        # تخمین اولیه محافظه‌کارانه: 103% قیمت مرجع (نه 105%)
+        # چون عواقب رد شدن = از دست دادن بای‌باکس موقت
+        if reference_price > 0:
+            conservative = int(reference_price * 1.03 // DEFAULT_STEP * DEFAULT_STEP)
+        else:
+            conservative = current_price
+
+        return min(max_price, conservative)
+
+    def _probe_and_cache_ceiling(
+        self,
+        variant_id:      str,
+        reference_price: int,
+        current_price:   int,
+        user_max_price:  int,
+    ) -> int:
+        """
+        کشف سقف واقعی با binary search.
+        فقط اگه price_probe_fn تنظیم شده باشه.
+
+        اگه probe_fn نداریم → تخمین محافظه‌کارانه برمیگردونیم.
+        """
+        if not self.price_probe_fn:
+            return self._effective_ceiling(
+                variant_id, reference_price, current_price, user_max_price
+            )
+
+        # مرزهای binary search
+        lo = current_price
+        hi = min(user_max_price, int(reference_price * 1.15) if reference_price else user_max_price)
+        hi = int(round(hi / DEFAULT_STEP) * DEFAULT_STEP)
+
+        last_ok       = current_price
+        last_rejected = None
+
+        for _ in range(CEILING_PROBE_MAX_ITER):
+            if hi - lo < DEFAULT_STEP:
+                break
+            mid = int(round((lo + hi) / 2 / DEFAULT_STEP) * DEFAULT_STEP)
+            if mid == lo or mid == hi:
+                break
+
+            accepted = self.price_probe_fn(variant_id, mid)
+            if accepted:
+                last_ok = mid
+                lo      = mid
+            else:
+                last_rejected = mid
+                hi            = mid
+
+        # بازگرداندن به قیمت اصلی بعد از probe
+        if last_ok != current_price:
+            self.price_probe_fn(variant_id, current_price)
+
+        ceiling = last_ok
+        self.ceiling.set(
+            variant_id      = variant_id,
+            ceiling         = ceiling,
+            reference_price = reference_price,
+            last_rejected   = last_rejected,
+        )
+        return min(user_max_price, ceiling)
 
     def decide(self, d: StrategyInput) -> ScenarioResult:
 
         step = max(DEFAULT_STEP, int(d.step or DEFAULT_STEP))
 
-        winner_info       = d.winner_info or {}
-        comp_seller_id    = int(winner_info.get("seller_id") or 0)
-        comp_seller_rate  = float(winner_info.get("seller_rate") or 82.0)
-        comp_lead_time    = int(winner_info.get("lead_time") or 2)
-        item_votes        = int(winner_info.get("item_votes") or 0)
+        winner_info      = d.winner_info or {}
+        comp_seller_id   = int(winner_info.get("seller_id") or 0)
+        comp_seller_rate = float(winner_info.get("seller_rate") or 82.0)
+        comp_lead_time   = int(winner_info.get("lead_time") or 2)
 
-        # ─── تنها در بازار ───────────────────────────────────────────────────
-        if d.alone_in_market or d.competitor_price <= 0:
-            return ScenarioResult(
-                target_price    = d.max_price,
-                predicted_score = 99.0,
-                scenario        = "alone",
-                reason          = "تنها فروشنده — حداکثر قیمت",
-                confidence      = 1.0,
-            )
-
-        # امتیاز فعلی ما
-        current_score = d.buy_box_score or self.predictor.predict_score(
-            my_price         = d.current_price,
-            comp_price       = d.competitor_price,
-            my_seller_rate   = d.my_seller_rate,
-            comp_seller_rate = comp_seller_rate,
-            my_lead_time     = d.my_lead_time,
-            comp_lead_time   = comp_lead_time,
+        # سقف مؤثر (محدودیت سایت + محدودیت کاربر)
+        effective_ceil = self._effective_ceiling(
+            variant_id      = str(d.variant_id) if hasattr(d, "variant_id") else "0",
+            reference_price = d.reference_price if hasattr(d, "reference_price") else 0,
+            current_price   = d.current_price,
+            max_price       = d.max_price,
         )
 
-        # ─── سناریو طمع (Greed) ──────────────────────────────────────────────
-        # داریم بای‌باکس رو و امتیاز خیلی بالاست → قیمت رو بالا ببر
-        if d.is_buy_box_winner and current_score >= GREED_THRESHOLD:
-            new_price = min(d.max_price, d.current_price + step)
-            new_score = self.predictor.predict_score(
-                my_price         = new_price,
-                comp_price       = d.competitor_price,
+        def _score(price: int) -> float:
+            return self.predictor.predict_score(
+                my_price         = price,
+                comp_price       = d.competitor_price if d.competitor_price > 0 else price + 1,
                 my_seller_rate   = d.my_seller_rate,
                 comp_seller_rate = comp_seller_rate,
                 my_lead_time     = d.my_lead_time,
                 comp_lead_time   = comp_lead_time,
             )
-            if new_score >= WIN_THRESHOLD:
+
+        def _snap(price: int, step_: int) -> int:
+            """رُند به نزدیک‌ترین مضرب step، داخل [min, effective_ceil]"""
+            p = int(round(price / step_) * step_)
+            return max(d.min_price, min(effective_ceil, p))
+
+        # ─── سناریو ۱: تنها در بازار ────────────────────────────────────────
+        if d.alone_in_market or d.competitor_price <= 0:
+            # وقتی رقیبی نیست، هدف رسیدن به سقف واقعی سایته — نه فقط max_price کاربر
+            # اگه قیمت فعلی از effective_ceil کمتره، قدم‌به‌قدم بالا میریم
+            if d.current_price < effective_ceil:
+                target = _snap(d.current_price + step, step)
+                target = min(target, effective_ceil)
                 return ScenarioResult(
-                    target_price    = new_price,
-                    predicted_score = new_score,
-                    scenario        = "greed",
-                    reason          = f"امتیاز {current_score:.1f} > {GREED_THRESHOLD} → طمع +{step:,}",
-                    confidence      = 0.7,
+                    target_price    = target,
+                    predicted_score = 99.0,
+                    scenario        = "alone_up",
+                    reason          = (
+                        f"تنها فروشنده — بالا میریم "
+                        f"{d.current_price:,} → {target:,} "
+                        f"(سقف مجاز: {effective_ceil:,})"
+                    ),
+                    confidence = 0.9,
+                )
+            # رسیدیم به سقف مجاز → نگه می‌داریم
+            return ScenarioResult(
+                target_price    = d.current_price,
+                predicted_score = 99.0,
+                scenario        = "alone_hold",
+                reason          = f"تنها فروشنده — روی سقف مجاز {effective_ceil:,} هستیم",
+                confidence      = 1.0,
+            )
+
+        # امتیاز فعلی
+        current_score = d.buy_box_score or _score(d.current_price)
+
+        # ─── سناریو ۲: طمع — برنده + امتیاز بالا ───────────────────────────
+        if d.is_buy_box_winner and current_score >= GREED_THRESHOLD:
+            candidate = _snap(d.current_price + step, step)
+
+            if candidate > effective_ceil:
+                # به سقف مجاز رسیدیم → نگه‌داری
+                return ScenarioResult(
+                    target_price    = d.current_price,
+                    predicted_score = current_score,
+                    scenario        = "greed_ceiling",
+                    reason          = (
+                        f"طمع: به سقف سایت {effective_ceil:,} رسیدیم "
+                        f"(امتیاز={current_score:.1f})"
+                    ),
+                    confidence = 0.95,
                 )
 
-        # ─── سناریو نگه‌داری (Hold) ─────────────────────────────────────────
-        # داریم بای‌باکس رو و امتیاز در منطقه امن است
-        if d.is_buy_box_winner and SAFE_ZONE_MIN <= current_score < GREED_THRESHOLD:
+            new_score = _score(candidate)
+            if new_score >= WIN_THRESHOLD:
+                return ScenarioResult(
+                    target_price    = candidate,
+                    predicted_score = new_score,
+                    scenario        = "greed",
+                    reason          = (
+                        f"طمع: امتیاز {current_score:.1f} → "
+                        f"+{step:,} | امتیاز پیش‌بینی {new_score:.1f}"
+                    ),
+                    confidence = 0.75,
+                )
+            # افزایش قیمت امتیاز رو زیر حد میبره → نگه‌داری
+            return ScenarioResult(
+                target_price    = d.current_price,
+                predicted_score = current_score,
+                scenario        = "greed_blocked",
+                reason          = (
+                    f"طمع متوقف: +{step:,} امتیاز رو به "
+                    f"{new_score:.1f} میبره (< {WIN_THRESHOLD})"
+                ),
+                confidence = 0.8,
+            )
+
+        # ─── سناریو ۳: عقب‌نشینی رقیب ──────────────────────────────────────
+        # رقیب قیمتش بالاتر از ماست → ما هم بالا میریم تا حد مجاز
+        if d.is_buy_box_winner and d.competitor_price > d.current_price * 1.03:
+            # هدف: رفتن به comp_price - step (ولی نه بیشتر از سقف)
+            target = _snap(d.competitor_price - step, step)
+            target = min(target, effective_ceil)
+
+            if target <= d.current_price:
+                # فرقی نمی‌کنه، بمون
+                return ScenarioResult(
+                    target_price    = d.current_price,
+                    predicted_score = current_score,
+                    scenario        = "hold",
+                    reason          = f"رقیب {d.competitor_price:,} ولی فاصله کافی نیست",
+                    confidence      = 0.8,
+                )
+
+            new_score = _score(target)
+            if new_score >= WIN_THRESHOLD:
+                return ScenarioResult(
+                    target_price    = target,
+                    predicted_score = new_score,
+                    scenario        = "retreat_up",
+                    reason          = (
+                        f"رقیب کشید عقب ({d.competitor_price:,}) — "
+                        f"ما: {d.current_price:,} → {target:,}"
+                    ),
+                    confidence = 0.80,
+                )
+
+        # ─── سناریو ۴: نگه‌داری ─────────────────────────────────────────────
+        if d.is_buy_box_winner and current_score >= SAFE_ZONE_MIN:
             return ScenarioResult(
                 target_price    = d.current_price,
                 predicted_score = current_score,
                 scenario        = "hold",
                 reason          = f"امتیاز {current_score:.1f} در منطقه امن — نگه می‌داریم",
-                confidence      = 0.8,
+                confidence      = 0.85,
             )
 
-        # ─── سناریو عقب‌نشینی (Retreat) ────────────────────────────────────
-        # رقیب کشید عقب یا قیمت رقیب خیلی بالاتر از ما → ما هم قیمت رو بالا ببریم
-        if d.is_buy_box_winner and d.competitor_price > d.current_price * 1.05:
-            new_price = min(d.max_price, d.competitor_price - step)
-            new_score = self.predictor.predict_score(
-                my_price         = new_price,
-                comp_price       = d.competitor_price,
-                my_seller_rate   = d.my_seller_rate,
-                comp_seller_rate = comp_seller_rate,
-                my_lead_time     = d.my_lead_time,
-                comp_lead_time   = comp_lead_time,
-            )
-            if new_score >= WIN_THRESHOLD:
-                return ScenarioResult(
-                    target_price    = new_price,
-                    predicted_score = new_score,
-                    scenario        = "retreat_up",
-                    reason          = f"رقیب کشید عقب به {d.competitor_price:,} — ما هم بالا میریم",
-                    confidence      = 0.75,
-                )
-
-        # ─── سناریو برنده شدن (Win) ─────────────────────────────────────────
-        # بای‌باکس نداریم → محاسبه قیمت برای برنده شدن
+        # ─── سناریو ۵: برنده شدن (بازنده هستیم) ────────────────────────────
         optimal_gap, gap_confidence = self.memory.get_optimal_gap(comp_seller_id, step)
 
-        # قیمت هدف برای برنده شدن
         target_win_price = self.predictor.find_price_for_score(
-            target_score     = WIN_THRESHOLD + 5,  # کمی بالاتر از آستانه
+            target_score     = WIN_THRESHOLD + 5,
             comp_price       = d.competitor_price,
             my_seller_rate   = d.my_seller_rate,
             comp_seller_rate = comp_seller_rate,
@@ -405,11 +650,8 @@ class ScenarioEngine:
             min_price        = d.min_price,
             max_price        = d.max_price,
         )
-
-        # قیمت بر اساس gap حافظه
         target_gap_price = d.competitor_price - optimal_gap
 
-        # اگه confidence حافظه بالاست از gap استفاده کن، وگرنه از مدل
         if gap_confidence > 0.6:
             final_target = target_gap_price
             confidence   = gap_confidence
@@ -417,12 +659,10 @@ class ScenarioEngine:
         else:
             final_target = min(target_win_price, target_gap_price)
             confidence   = 0.5 + gap_confidence * 0.3
-            reason       = f"مدل: هدف امتیاز {WIN_THRESHOLD+5} | gap={optimal_gap:,}"
+            reason       = f"مدل: هدف امتیاز {WIN_THRESHOLD+5:.0f} | gap={optimal_gap:,}"
 
-        final_target = max(d.min_price, min(d.max_price, final_target))
-        final_target = int(round(final_target / DEFAULT_STEP) * DEFAULT_STEP)
+        final_target = _snap(final_target, step)
 
-        # اگه هدف با قیمت فعلی یکیه → رد کن
         if final_target == d.current_price:
             return ScenarioResult(
                 target_price    = d.current_price,
@@ -432,15 +672,7 @@ class ScenarioEngine:
                 confidence      = confidence,
             )
 
-        predicted = self.predictor.predict_score(
-            my_price         = final_target,
-            comp_price       = d.competitor_price,
-            my_seller_rate   = d.my_seller_rate,
-            comp_seller_rate = comp_seller_rate,
-            my_lead_time     = d.my_lead_time,
-            comp_lead_time   = comp_lead_time,
-        )
-
+        predicted = _score(final_target)
         return ScenarioResult(
             target_price    = final_target,
             predicted_score = predicted,
