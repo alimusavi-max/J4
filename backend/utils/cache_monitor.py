@@ -3,6 +3,7 @@ backend/utils/cache_monitor.py
 
 پایش تغییر کش دیجی‌کالا بعد از آپدیت قیمت.
 نسخه ۵.۱ — رفع NameError برای W_PRICE/W_SELLER/W_LEAD
+تغییرات: افزایش زمان پایش به ۴۰ دقیقه و چک کردن هر ۱ دقیقه
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ from utils.strategies import W_PRICE, W_SELLER, W_LEAD
 BASE_DIR    = Path(__file__).resolve().parent.parent
 MONITOR_LOG = BASE_DIR / "cache_monitor_log.json"
 
-POLL_INTERVAL_SEC = 15
-MAX_WAIT_SEC      = 1800
+POLL_INTERVAL_SEC = 60    # <--- تغییر یافت به ۶۰ ثانیه (۱ دقیقه)
+MAX_WAIT_SEC      = 2400  # <--- تغییر یافت به ۲۴۰۰ ثانیه (۴۰ دقیقه)
 SCORE_CHANGE_EPS  = 0.5
 PRICE_CHANGE_EPS  = 5_000
 

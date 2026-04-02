@@ -4,7 +4,7 @@ backend/main.py  —  نسخه ۵.۲
   - endpoint تاریخچه قیمت per-variant
   - export/import config
   - auth status polling
-  - رفع تناقض default_step در settings
+  - آپدیت مقادیر پیش‌فرض پایش کش به ۶۰ ثانیه فاصله زمانی و ۲۴۰۰ ثانیه (۴۰ دقیقه) حداکثر انتظار
 """
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,8 +54,8 @@ DEFAULT_SETTINGS = {
     "my_seller_id":               0,
     "my_seller_rate":             85.0,
     "enable_cache_monitor":       True,
-    "cache_poll_interval":        15,
-    "cache_max_wait":             1800,
+    "cache_poll_interval":        60,      # <--- آپدیت شد به ۶۰
+    "cache_max_wait":             2400,    # <--- آپدیت شد به ۲۴۰۰
     "credit_increase_percentage": 8.1,
 }
 
@@ -95,7 +95,6 @@ def _load_settings() -> dict:
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-                # ─── FIX: cap کردن max_retries خطرناک ────────────────────────
                 if loaded.get("max_retries", 0) > 10:
                     loaded["max_retries"] = 3
                 return {**DEFAULT_SETTINGS, **loaded}
@@ -193,8 +192,8 @@ class SettingsModel(BaseModel):
     my_seller_id:                 int   = 0
     my_seller_rate:               float = 85.0
     enable_cache_monitor:         bool  = True
-    cache_poll_interval:          int   = 15
-    cache_max_wait:               int   = 1800
+    cache_poll_interval:          int   = 60    # <--- آپدیت شد به ۶۰
+    cache_max_wait:               int   = 2400  # <--- آپدیت شد به ۲۴۰۰
     credit_increase_percentage:   float = 8.1
 
 class FormulaTestModel(BaseModel):

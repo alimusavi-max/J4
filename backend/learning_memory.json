@@ -1,7 +1,7 @@
 {
   "1184130": {
-    "last_gap": 20000,
-    "last_result": "win",
+    "last_gap": 0,
+    "last_result": "loss",
     "observations": [
       {
         "gap": 19000,
@@ -26,9 +26,91 @@
         "won": true,
         "my_score": 90.48,
         "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 84.72,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 90.48,
+        "comp_score": null
       }
     ],
     "best_gap": 19000,
-    "win_rate": 1.0
+    "win_rate": 0.364
+  },
+  "0": {
+    "observations": [
+      {
+        "gap": 0,
+        "won": true,
+        "my_score": 94.5,
+        "comp_score": null
+      },
+      {
+        "gap": 0,
+        "won": false,
+        "my_score": 94.5,
+        "comp_score": null
+      },
+      {
+        "gap": 20000,
+        "won": true,
+        "my_score": 94.5,
+        "comp_score": null
+      }
+    ],
+    "best_gap": 0,
+    "win_rate": 0.667,
+    "last_gap": 20000,
+    "last_result": "win"
+  },
+  "67196": {
+    "observations": [
+      {
+        "gap": 20000,
+        "won": true,
+        "my_score": 90.68,
+        "comp_score": null
+      }
+    ],
+    "best_gap": 20000,
+    "win_rate": 1.0,
+    "last_gap": 20000,
+    "last_result": "win"
   }
 }

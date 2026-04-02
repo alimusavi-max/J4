@@ -2,10 +2,7 @@
 backend/utils/repricer_engine.py
 
 موتور اصلی ربات قیمت‌گذاری — نسخه ۵.۲
-اصلاحات:
-  - credit_increase_percentage در payload آپدیت قیمت
-  - خواندن credit_increase_percentage از پاسخ API برای ذخیره در config
-  - بهبود لاگ‌گذاری قیمت رقیب
+تغییرات: تنظیمات پیش‌فرض پایش کش به ۶۰ ثانیه اینتروال و ۲۴۰۰ ثانیه (۴۰ دقیقه) مکس‌وِیت آپدیت شد
 """
 import requests
 import json
@@ -46,10 +43,9 @@ DEFAULT_SETTINGS = {
     "my_seller_id":             0,
     "my_seller_rate":           85.0,
     "enable_cache_monitor":     True,
-    "cache_poll_interval":      15,
-    "cache_max_wait":           1800,
-    # ─── جدید ────────────────────────────────────────────────────────────────
-    "credit_increase_percentage": 8.1,   # درصد افزایش قیمت اعتباری (پیش‌فرض دیجی‌کالا)
+    "cache_poll_interval":      60,      # <--- آپدیت شد به ۶۰ ثانیه
+    "cache_max_wait":           2400,    # <--- آپدیت شد به ۴۰ دقیقه
+    "credit_increase_percentage": 8.1,   
 }
 
 
@@ -148,7 +144,6 @@ class DigikalaRepricer:
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                    # ─── FIX: اگه max_retries بیش از ۱۰ بود، cap کن ──────────
                     if loaded.get("max_retries", 0) > 10:
                         loaded["max_retries"] = 3
                         self.log("⚠️ max_retries به ۳ reset شد (مقدار قبلی خیلی زیاد بود)")
@@ -326,7 +321,6 @@ class DigikalaRepricer:
                             "buy_box_score":           item.get("buy_box_score"),
                             "stock":                   item.get("marketplace_seller_stock", 0),
                             "seller_stock":            item.get("seller_stock", 0),
-                            # ─── FIX: ذخیره credit_increase_percentage از پاسخ API ──
                             "credit_increase_percentage": item.get("credit_increase_percentage", 8.1),
                         })
                 return {"success": True, "variants": variants, "total_pages": total_pages}
@@ -346,7 +340,6 @@ class DigikalaRepricer:
         silent:       bool = False,
         product_id:   Optional[int] = None,
         my_seller_id: int = 0,
-        # ─── FIX: پارامتر جدید credit_increase_percentage ──────────────────
         credit_increase_percentage: float = 8.1,
     ) -> dict:
         url = "https://seller.digikala.com/api/v2/variants/bulk"
@@ -365,7 +358,6 @@ class DigikalaRepricer:
                 my_seller_id = my_seller_id,
             )
 
-        # ─── FIX: payload کامل با credit_increase_percentage ────────────────
         payload = {"variants": [{
             "variant_id":                 int(variant_id),
             "selling_price":              int(new_price),
@@ -412,7 +404,6 @@ class DigikalaRepricer:
                         self._on_failure(str(err))
                         return {"success": False, "message": str(err)}
 
-                    # ─── استخراج قیمت واقعی بعد از تایید ────────────────────
                     confirmed = (
                         body.get("data", {})
                             .get("successful_updates", [{}])[0]
@@ -435,8 +426,8 @@ class DigikalaRepricer:
                             my_seller_id    = my_seller_id,
                             snapshot_before = snapshot_before,
                             on_flush        = lambda ev: self._on_cache_flush(ev, variant_id),
-                            poll_interval   = int(s.get("cache_poll_interval", 15)),
-                            max_wait        = int(s.get("cache_max_wait", 1800)),
+                            poll_interval   = int(s.get("cache_poll_interval", 60)), # آپدیت شد
+                            max_wait        = int(s.get("cache_max_wait", 2400)),    # آپدیت شد
                         )
 
                     return {"success": True}
@@ -686,7 +677,6 @@ class DigikalaRepricer:
             is_winner  = bool(item.get("is_buy_box_winner"))
             product_id = item.get("product_id") or conf.get("product_id")
             step       = int(conf.get("step", default_step))
-            # ─── FIX: استفاده از credit_increase_percentage واقعی کالا ──────
             credit_pct = float(item.get("credit_increase_percentage") or
                                s.get("credit_increase_percentage", 8.1))
 
@@ -723,7 +713,6 @@ class DigikalaRepricer:
             strategy = get_strategy(str(conf.get("strategy", "adaptive_sniper")))
             result   = strategy.decide_with_details(strategy_input)
 
-            # ─── لاگ بهبود یافته با قیمت رقیب ──────────────────────────────
             comp_str = f"رقیب: {comp_price:,}" if comp_price else "تنها در بازار"
             self.log(
                 f"🎯 [{item['title'][:20]}] "

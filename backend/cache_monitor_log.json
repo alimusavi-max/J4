@@ -1,0 +1,38 @@
+[
+  {
+    "variant_id": 76284348,
+    "product_id": 804856,
+    "before_price": 13800000,
+    "after_price": 13880000,
+    "before_score": 94.5,
+    "after_score": 94.5,
+    "before_winner": true,
+    "after_winner": true,
+    "wait_seconds": 60.0,
+    "flushed_at": "2026-04-02T06:32:53.813675"
+  },
+  {
+    "variant_id": 76284348,
+    "product_id": 804856,
+    "before_price": 13880000,
+    "after_price": 13900000,
+    "before_score": 94.5,
+    "after_score": 94.5,
+    "before_winner": true,
+    "after_winner": false,
+    "wait_seconds": 60.0,
+    "flushed_at": "2026-04-02T06:56:10.014434"
+  },
+  {
+    "variant_id": 76284348,
+    "product_id": 804856,
+    "before_price": 13900000,
+    "after_price": 13880000,
+    "before_score": 94.5,
+    "after_score": 94.5,
+    "before_winner": false,
+    "after_winner": true,
+    "wait_seconds": 60.0,
+    "flushed_at": "2026-04-02T07:02:44.193192"
+  }
+]
