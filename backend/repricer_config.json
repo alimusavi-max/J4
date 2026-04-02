@@ -8,7 +8,7 @@
     "76284348": {
         "min_price": 12000000,
         "max_price": 18000000,
-        "enabled": false,
+        "enabled": true,
         "strategy": "smart"
     }
 }

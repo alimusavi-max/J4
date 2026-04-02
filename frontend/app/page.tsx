@@ -1,5 +1,5 @@
 "use client";
-
+import { AuthBadge, PriceSparkline,CompetitorCell,ExportImportBar } from "./components";
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const API = "http://localhost:8000";
@@ -71,6 +71,28 @@ const DEFAULT_SETTINGS: Settings = {
 
 type ActiveTab = "dashboard" | "products" | "settings" | "logs";
 type FilterMode = "all" | "winning" | "losing" | "enabled" | "disabled";
+
+// ─── localStorage helpers ────────────────────────────────────────────────────
+const LS_PRODUCTS_KEY = "dk_repricer_products";
+const LS_WORKSPACE_KEY = "dk_repricer_workspace";
+
+function loadFromStorage<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveToStorage(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // quota exceeded — silently ignore
+  }
+}
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 interface Toast {
@@ -311,15 +333,25 @@ function VariantBotToggle({
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function RepricerApp() {
   const [tab, setTab] = useState<ActiveTab>("dashboard");
-  const [products, setProducts] = useState<Product[]>([]);
+
+  // ─── FIX: مقداردهی اولیه products از localStorage ──────────────────────────
+  const [products, setProducts] = useState<Product[]>(() =>
+    loadFromStorage<Product[]>(LS_PRODUCTS_KEY, [])
+  );
+
   const [logs, setLogs] = useState<string[]>([]);
   const [botState, setBotState] = useState<BotState>({});
   const [isRunning, setIsRunning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+
+  // ─── FIX: مقداردهی اولیه workspaceId از localStorage ──────────────────────
   const [cycleDelay, setCycleDelay] = useState(120);
-  const [workspaceId, setWorkspaceId] = useState(1);
+  const [workspaceId, setWorkspaceId] = useState<number>(() =>
+    loadFromStorage<number>(LS_WORKSPACE_KEY, 1)
+  );
+
   const [filter, setFilter] = useState<FilterMode>("all");
   const [search, setSearch] = useState("");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -329,7 +361,22 @@ export default function RepricerApp() {
   const [bulkMin, setBulkMin] = useState("");
   const [bulkMax, setBulkMax] = useState("");
   const [cycleHistory, setCycleHistory] = useState<number[]>([]);
+  const [lastSyncTime, setLastSyncTime] = useState<string>(() =>
+    loadFromStorage<string>("dk_last_sync", "")
+  );
   const logsRef = useRef<HTMLDivElement>(null);
+
+  // ─── FIX: ذخیره products در localStorage هر بار که تغییر می‌کند ───────────
+  useEffect(() => {
+    if (products.length > 0) {
+      saveToStorage(LS_PRODUCTS_KEY, products);
+    }
+  }, [products]);
+
+  // ─── FIX: ذخیره workspaceId هنگام تغییر ────────────────────────────────────
+  useEffect(() => {
+    saveToStorage(LS_WORKSPACE_KEY, workspaceId);
+  }, [workspaceId]);
 
   // ─── Toast ─────────────────────────────────────────────────────────────────
   const toast = useCallback((msg: string, type: Toast["type"] = "info") => {
@@ -419,11 +466,24 @@ export default function RepricerApp() {
         max_price: cfgData[String(v.variant_id)]?.max_price || v.max_price,
       }));
       setProducts(merged);
+      // ─── FIX: ثبت زمان آخرین همگام‌سازی ─────────────────────────────────
+      const syncTime = new Date().toLocaleString("fa-IR");
+      setLastSyncTime(syncTime);
+      saveToStorage("dk_last_sync", syncTime);
       toast(`${varData.total || 0} تنوع دریافت شد`, "success");
     } catch {
       toast("خطا در ارتباط با سرور", "error");
     }
     setLoading(false);
+  };
+
+  // ─── FIX: پاک‌کردن کش محصولات ──────────────────────────────────────────────
+  const clearProductCache = () => {
+    localStorage.removeItem(LS_PRODUCTS_KEY);
+    localStorage.removeItem("dk_last_sync");
+    setProducts([]);
+    setLastSyncTime("");
+    toast("کش محصولات پاک شد", "warn");
   };
 
   const saveConfigs = async () => {
@@ -435,7 +495,7 @@ export default function RepricerApp() {
           ...(p.min_price !== "" && { min_price: parseInt(String(p.min_price)) }),
           ...(p.max_price !== "" && { max_price: parseInt(String(p.max_price)) }),
           enabled: p.enabled !== false,
-          strategy: "smart", // همیشه استراتژی هوشمند اعمال میشود
+          strategy: "smart",
         };
       }
     });
@@ -889,7 +949,7 @@ export default function RepricerApp() {
               {tab === "products" &&
                 `${products.length} تنوع | ${enabledVariants} فعال | ${disabledVariants} متوقف`}
               {tab === "dashboard" &&
-                `workspace: ${workspaceId} | ${isRunning ? "در حال اجرا" : "متوقف"}`}
+                `workspace: ${workspaceId} | ${isRunning ? "در حال اجرا" : "متوقف"}${lastSyncTime ? ` | آخرین همگام‌سازی: ${lastSyncTime}` : ""}`}
               {tab === "settings" && "پیکربندی هوش مصنوعی"}
               {tab === "logs" && `${logs.length} خط لاگ`}
             </div>
@@ -1036,6 +1096,23 @@ export default function RepricerApp() {
                       }}
                     >
                       ▶ رصد تصمیم‌گیری‌های ربات
+                    </button>
+                    {/* ─── FIX: دکمه پاک‌کردن کش ────────────────────────────── */}
+                    <button
+                      onClick={clearProductCache}
+                      style={{
+                        padding: "10px 16px",
+                        background: "#ff456011",
+                        border: "1px solid #ff456033",
+                        borderRadius: 3,
+                        color: "#ff4560",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                        textAlign: "right",
+                      }}
+                    >
+                      ⊗ پاک‌کردن کش محصولات
                     </button>
                   </div>
                 </div>
@@ -1197,6 +1274,17 @@ export default function RepricerApp() {
 
                 <div style={{ flex: 1 }} />
 
+                {/* ─── FIX: نمایش زمان آخرین همگام‌سازی ──────────────────── */}
+                {lastSyncTime && (
+                  <span style={{
+                    fontSize: 9,
+                    color: "#2a3447",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}>
+                    آخرین sync: {lastSyncTime}
+                  </span>
+                )}
+
                 <button
                   onClick={loadProducts}
                   disabled={loading}
@@ -1211,7 +1299,7 @@ export default function RepricerApp() {
                     fontFamily: "'IBM Plex Mono', monospace",
                   }}
                 >
-                  {loading ? "..." : "↓ دریافت"}
+                  {loading ? "..." : "↓ دریافت از سایت"}
                 </button>
                 <button
                   onClick={saveConfigs}
@@ -1816,7 +1904,6 @@ export default function RepricerApp() {
                   overflow: "hidden",
                 }}
               >
-                {/* Fake terminal header */}
                 <div
                   style={{
                     padding: "10px 16px",
